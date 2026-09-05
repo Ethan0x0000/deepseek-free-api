@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import AsyncGenerator, List, Optional
+from typing import AsyncGenerator, List, Optional, Dict, Any
 import httpx
 from app.schemas.chat import (
     DeepSeekChatRequest,
@@ -10,21 +10,21 @@ from app.schemas.chat import (
 
 
 class BaseLLMProvider(ABC):
-    """Абстрактный базовый класс для всех LLM-провайдеров (DeepSeek, Qwen, GLM)."""
+    """所有 LLM 提供商 (DeepSeek, Qwen, GLM) 的抽象基类。"""
 
     def __init__(self, provider_id: str, display_name: str, http_client: httpx.AsyncClient):
         self.provider_id = provider_id
         self.display_name = display_name
-        self.client = http_client
+        self.http_client = http_client
 
     @abstractmethod
     def get_models(self) -> List[ModelInfo]:
-        """Возвращает список поддерживаемых моделей провайдера."""
+        """返回提供商支持的模型列表。"""
         pass
 
     @abstractmethod
     def is_authenticated(self) -> bool:
-        """Проверяет наличие токена авторизации для данного провайдера."""
+        """检查该提供商的认证凭证是否存在。"""
         pass
 
     @abstractmethod
@@ -32,7 +32,7 @@ class BaseLLMProvider(ABC):
         self,
         request: DeepSeekChatRequest,
     ) -> AsyncGenerator[StreamChunk, None]:
-        """Потоковый вызов чата (генератор StreamChunk)."""
+        """流式调用接口 (生成 StreamChunk 对象)。"""
         pass
 
     @abstractmethod
@@ -40,21 +40,24 @@ class BaseLLMProvider(ABC):
         self,
         request: DeepSeekChatRequest,
     ) -> DeepSeekChatResponse:
-        """Синхронный вызов чата."""
+        """同步非流式调用接口。"""
         pass
 
+    @abstractmethod
     def get_current_session_id(self) -> Optional[str]:
-        """Возвращает ID текущей активной сессии."""
-        return None
+        """获取当前活跃会话 ID。"""
+        pass
 
+    @abstractmethod
     def set_session_id(self, session_id: str) -> None:
-        """Устанавливает текущую активную сессию."""
+        """设置当前活跃会话 ID。"""
         pass
 
+    @abstractmethod
     def reset_session(self) -> None:
-        """Сбрасывает контекст текущей сессии."""
+        """重置当前会话上下文。"""
         pass
 
-    async def list_sessions(self) -> List[dict]:
-        """Возвращает список доступных сессий/чатов."""
+    async def list_sessions(self) -> List[Dict[str, Any]]:
+        """获取服务端历史会话列表。"""
         return []

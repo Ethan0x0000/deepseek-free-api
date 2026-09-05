@@ -55,7 +55,7 @@ def test_anthropic_response_with_tools_and_thinking():
     assert anthropic_resp.stop_reason == "tool_use"
     assert anthropic_resp.usage.output_tokens == 120
 
-    # Проверяем блоки content: при tool_use должны быть строго чистые tool_use блоки
+    # 验证 content 内容块: 发生 tool_use 时应严格包含工具调用块
     types = [b.type for b in anthropic_resp.content]
     assert "tool_use" in types
     assert "thinking" not in types
@@ -67,7 +67,7 @@ def test_anthropic_response_with_tools_and_thinking():
 
 
 def test_anthropic_response_with_thinking_no_tools():
-    """Тестирует обычный ответ с thinking без вызовов инструментов."""
+    """测试不含工具调用的纯思考链与正文回答。"""
     mock_resp = DeepSeekChatResponse(
         content="The weather in Moscow is 15C.",
         thinking="Checking weather facts.",
@@ -85,6 +85,6 @@ def test_anthropic_response_with_thinking_no_tools():
 @pytest.mark.asyncio
 async def test_anthropic_endpoint_validation():
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
-        # Проверка пустого запроса
+        # 空请求校验
         resp = await ac.post("/v1/messages", json={"messages": []})
         assert resp.status_code == 400 or resp.status_code == 422

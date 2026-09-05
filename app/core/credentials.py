@@ -36,7 +36,7 @@ class CredentialsManager:
                                 st = st[7:].strip()
                             tokens["deepseek"] = st
             except Exception as e:
-                logger.debug(f"Не удалось прочитать токены из {path}: {e}")
+                logger.debug(f"读取凭证文件失败 {path}: {e}")
         return tokens
 
     def load(self) -> Dict[str, str]:
@@ -79,17 +79,17 @@ class CredentialsManager:
             self.project_file.parent.mkdir(parents=True, exist_ok=True)
             with open(self.project_file, "w", encoding="utf-8") as f:
                 json.dump(payload, f, indent=2)
-            logger.info(f"Токен [{prov}] сохранен в {self.project_file}")
+            logger.info(f"Token [{prov}] 已保存至 {self.project_file}")
         except Exception as e:
-            logger.warning(f"Не удалось сохранить в {self.project_file}: {e}")
+            logger.warning(f"保存至 {self.project_file} 失败: {e}")
 
         try:
             self.user_file.parent.mkdir(parents=True, exist_ok=True)
             with open(self.user_file, "w", encoding="utf-8") as f:
                 json.dump(payload, f, indent=2)
-            logger.info(f"Токен [{prov}] сохранен в {self.user_file}")
+            logger.info(f"Token [{prov}] 已保存至 {self.user_file}")
         except Exception as e:
-            logger.warning(f"Не удалось сохранить в {self.user_file}: {e}")
+            logger.warning(f"保存至 {self.user_file} 失败: {e}")
 
         if prov == "deepseek":
             try:
@@ -110,7 +110,7 @@ class CredentialsManager:
                 with open(self.env_file, "w", encoding="utf-8") as f:
                     f.writelines(env_lines)
             except Exception as e:
-                logger.warning(f"Не удалось обновить {self.env_file}: {e}")
+                logger.warning(f"更新 {self.env_file} 失败: {e}")
 
     @property
     def token(self) -> Optional[str]:
@@ -121,7 +121,7 @@ class CredentialsManager:
         t = self.token
         if not t:
             raise ValueError(
-                "Учетные данные DeepSeek не установлены! Укажите токен через credentials.json, .env или команду /token."
+                "未配置 DeepSeek 认证凭证！请通过 credentials.json、.env 或 /api/v1/auth/token 配置。"
             )
         return f"Bearer {t}"
 

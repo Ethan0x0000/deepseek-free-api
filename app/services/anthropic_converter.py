@@ -17,7 +17,7 @@ def build_anthropic_tools_prompt(
     tools: List[AnthropicTool],
     tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
 ) -> str:
-    """Генерирует системную инструкцию инструментов из формата Anthropic."""
+    """生成 Anthropic 格式工具的系统指令。"""
     if tool_choice == "none":
         return ""
 
@@ -100,20 +100,20 @@ Alternatively, standard DSML format is also accepted:
 
 def convert_anthropic_request_to_deepseek(request: AnthropicMessagesRequest) -> Tuple[DeepSeekChatRequest, bool]:
     """
-    Конвертирует запрос Anthropic Messages API в DeepSeekChatRequest:
-    - Извлекает system prompt
-    - Распаковывает блоки content (text, image, tool_use, tool_result)
-    - Добавляет описания tools в нативном формате DeepSeek
+    将 Anthropic Messages API 请求转换为 DeepSeekChatRequest:
+    - 提取 system prompt
+    - 解析 content 内容块 (text, image, tool_use, tool_result)
+    - 转换 tools 定义为模型提示词
     """
     prompt_parts = []
 
-    # 1. Инструкция по инструментам
+    # 1. 工具调用指令
     has_tools = bool(request.tools)
     if request.tools:
         tool_choice = getattr(request, "tool_choice", None)
         prompt_parts.append(build_anthropic_tools_prompt(request.tools, tool_choice=tool_choice))
 
-    # 2. Системный промпт (в Anthropic передается отдельно)
+    # 2. 系统提示词 (Anthropic 独立传递)
     if request.system:
         if isinstance(request.system, str):
             prompt_parts.append(f"System Instructions:\n{request.system.strip()}")
@@ -127,7 +127,7 @@ def convert_anthropic_request_to_deepseek(request: AnthropicMessagesRequest) -> 
             if sys_texts:
                 prompt_parts.append("System Instructions:\n" + "\n".join(sys_texts))
 
-    # 3. Сообщения диалога
+    # 3. 对话历史消息
     history_messages = []
     for msg in request.messages:
         role = msg.role
@@ -146,6 +146,8 @@ def convert_anthropic_request_to_deepseek(request: AnthropicMessagesRequest) -> 
                         block_texts.append(block.get("text", ""))
                     elif b_type == "thinking":
                         block_texts.append(f"[Thinking: {block.get('thinking', '')}]")
+                    elif b_type in ["image", "image_url"]:
+                        block_texts.append("[User provided an image attachment]")
                     elif b_type == "tool_use":
                         fn_name = block.get("name", "")
                         fn_input = json.dumps(block.get("input", {}), ensure_ascii=False)
@@ -162,6 +164,8 @@ def convert_anthropic_request_to_deepseek(request: AnthropicMessagesRequest) -> 
                         block_texts.append(block.text)
                     elif block.type == "thinking" and block.thinking:
                         block_texts.append(f"[Thinking: {block.thinking}]")
+                    elif block.type in ["image", "image_url"]:
+                        block_texts.append("[User provided an image attachment]")
                     elif block.type == "tool_use":
                         fn_input = json.dumps(block.input or {}, ensure_ascii=False)
                         block_texts.append(f"\n<tool_call>\n{{\"name\": \"{block.name}\", \"arguments\": {fn_input}}}\n</tool_call>")
@@ -175,7 +179,7 @@ def convert_anthropic_request_to_deepseek(request: AnthropicMessagesRequest) -> 
     if history_messages:
         prompt_parts.append("Conversation History:\n" + "\n".join(history_messages))
 
-    # 4. Если последнее сообщение содержит результат инструмента, требуем немедленно вызвать следующий инструмент
+    # 4. 如果最后一条消息是工具执行结果，指令模型立即执行后续工具调用直到任务彻底完成
     if request.messages:
         last_msg = request.messages[-1]
         is_tool_turn = False
@@ -186,7 +190,10 @@ def convert_anthropic_request_to_deepseek(request: AnthropicMessagesRequest) -> 
                     break
         if is_tool_turn:
             prompt_parts.append(
-                "\n[System Directive: The previous tool execution has finished and its output is provided above. Proceed with the task immediately. If you need to inspect more files or run commands, invoke the tool call NOW: <tool_call>{\"name\": \"...\", \"arguments\": {...}}</tool_call>. Do NOT stop with only a conversational promise or intent.]"
+                "\n[Autonomous Directive: The tool execution result is provided above. Proceed with the task immediately. "
+                "Analyze the output and invoke the next tool call NOW if more investigation, code editing, or verification is needed: "
+                "<tool_call>{\"name\": \"...\", \"arguments\": {...}}</tool_call>. "
+                "DO NOT stop halfway with an intermediate conversational summary. Work relentlessly until the user's objective is 100% completed!]"
             )
 
     final_prompt = "\n\n".join(prompt_parts)
@@ -194,7 +201,7 @@ def convert_anthropic_request_to_deepseek(request: AnthropicMessagesRequest) -> 
     from app.services.context_compressor import context_compressor
     final_prompt = context_compressor.compress_raw_prompt(final_prompt)
 
-    # Определяем, включен ли режим рассуждений в Anthropic
+    # 判定是否启用思考模式
     thinking_enabled = None
     if request.thinking and request.thinking.type == "enabled":
         thinking_enabled = True
@@ -217,10 +224,10 @@ def convert_deepseek_response_to_anthropic(
     input_tokens: int = 0,
     cached_tokens: int = 0,
 ) -> AnthropicMessagesResponse:
-    """Преобразует синхронный ответ DeepSeek в AnthropicMessagesResponse."""
+    """将 DeepSeek 同步响应转换为 AnthropicMessagesResponse。"""
     content_blocks: List[AnthropicContentBlock] = []
 
-    # 1. Обрабатываем вызовы инструментов
+    # 1. 处理工具调用
     clean_text = resp.content
     stop_reason = "end_turn"
     found_tool_calls = None
@@ -243,7 +250,7 @@ def convert_deepseek_response_to_anthropic(
                     )
                 )
 
-    # 2. Если вызовов инструментов не было, добавляем thinking и text блоки
+    # 2. 如果没有工具调用，添加 thinking 和 text 块
     if not found_tool_calls:
         if resp.thinking:
             content_blocks.append(

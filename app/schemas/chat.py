@@ -8,14 +8,14 @@ class ChatMessage(BaseModel):
 
 
 class DeepSeekChatRequest(BaseModel):
-    prompt: str = Field(..., min_length=1, description="Текст запроса")
-    chat_session_id: Optional[str] = Field(default=None, description="ID сессии. Если не передан, используется активная или создается новая")
-    parent_message_id: Optional[int] = Field(default=None, description="ID родительского сообщения для продолжения контекста")
-    ref_file_ids: Optional[List[str]] = Field(default=None, description="ID прикрепленных файлов/изображений")
-    model: str = Field(default="deepseek-chat", description="Модель: deepseek-chat (expert), deepseek-reasoner (r1), deepseek-search")
-    thinking_enabled: Optional[bool] = Field(default=None, description="Включить режим рассуждений (DeepSeek R1)")
-    search_enabled: Optional[bool] = Field(default=None, description="Включить веб-поиск")
-    stream: bool = Field(default=True, description="Стриминг ответа (SSE)")
+    prompt: str = Field(..., min_length=1, description="请求提示词文本")
+    chat_session_id: Optional[str] = Field(default=None, description="会话 ID，如不传则使用当前活跃会话或创建新会话")
+    parent_message_id: Optional[int] = Field(default=None, description="父消息 ID，用于在同会话内串接上下文")
+    ref_file_ids: Optional[List[str]] = Field(default=None, description="已上传的附件/图像文件 ID 列表")
+    model: str = Field(default="deepseek-chat", description="模型标识符: deepseek-chat, deepseek-reasoner, deepseek-v4-pro 等")
+    thinking_enabled: Optional[bool] = Field(default=None, description="是否启用深度思考 (DeepSeek R1 / Thinking)")
+    search_enabled: Optional[bool] = Field(default=None, description="是否开启联网搜索")
+    stream: bool = Field(default=True, description="是否启用流式输出 (SSE)")
 
 
 class StreamChunk(BaseModel):

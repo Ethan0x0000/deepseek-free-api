@@ -1,231 +1,200 @@
-# 🚀 Multi-LLM Web Reverse Proxy & Agent Gateway
+<div align="center">
 
-<p align="center">
-  <b>Высокопроизводительный асинхронный прокси-шлюз и интерактивная консоль для DeepSeek (V4 Pro / Flash / R1) и Qwen (3.7 Plus / 3.8 Coder)</b><br>
-  Прямое взаимодействие с веб-версиями моделей без платных API-ключей, с поддержкой <b>Tool Use</b>, <b>1,000,000 токенов контекста</b> и интеграцией с AI-код-агентами (<b>Cline</b>, <b>Roo Code</b>, <b>Cursor</b>, <b>OpenCode</b>).
-</p>
+# DeepSeek & Qwen Free API Proxy
 
-<p align="center">
-  <img src="https://img.shields.io/badge/Python-3.10%2B-blue?style=flat-square&logo=python" alt="Python">
-  <img src="https://img.shields.io/badge/FastAPI-0.115%2B-009688?style=flat-square&logo=fastapi" alt="FastAPI">
-  <img src="https://img.shields.io/badge/OpenAI_API-Compatible-412991?style=flat-square&logo=openai" alt="OpenAI Compatible">
-  <img src="https://img.shields.io/badge/Anthropic_API-Compatible-d97706?style=flat-square&logo=anthropic" alt="Anthropic Compatible">
-  <img src="https://img.shields.io/badge/Context-1M_Tokens-emerald?style=flat-square" alt="1M Context">
-</p>
+**高性能异步反代网关 & 交互式控制台，支持 DeepSeek (V4 Pro / Flash / Vision / R1) 与 通义千问 (Qwen 3.7 Plus / 3.8)**
+
+无需付费 API 密钥，直接通过官方 Web 网页会话提供标准 API，完整支持 **Tool Use (Function Calling)**、**Vision 视觉多模态**、**100万 Token 上下文压缩** 与 AI 编程 Agent 深度适配（**OpenCode**, **Cline**, **Roo Code**, **Cursor**, **Claude Code**）。
 
 ---
 
-## 🌟 Ключевые возможности
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.115+-009688.svg?style=flat&logo=fastapi)](https://fastapi.tiangolo.com)
+[![Python](https://img.shields.io/badge/Python-3.10%20%7C%203.11%20%7C%203.12-blue.svg?style=flat&logo=python)](https://python.org)
+[![Docker](https://img.shields.io/badge/Docker-Ready-2496ED.svg?style=flat&logo=docker)](https://docker.com)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 
-- 🔓 **Бесплатный доступ без платных API-ключей**: Работает напрямую через официальные веб-сессии DeepSeek и Qwen.
-- 🌐 **Мульти-провайдерная маршрутизация**: Единая точка входа для моделей DeepSeek и Qwen Alibaba с автоматическим выбором провайдера по имени модели.
-- ⚡ **Мгновенный WASM Proof-of-Work (PoW)**: Встроенный солвер `DeepSeekHashV1` на WebAssembly решает криптографические челленджи менее чем за **50 мс**.
-- 🔑 **Автологин через окно браузера (Playwright)**: Команды `/login deepseek` и `/login qwen` запускают системный браузер, перехватывают сессионные JWT/Bearer токены и сохраняют состояние сессии в `.browser_profile/`.
-- 🧠 **1M Контекст и Интеллектуальный компрессор (~300k токенов)**:
-  - Автоматическая защита от деградации внимания при длинных сессиях.
-  - 100% сохранность системных промптов и определений инструментов (`Tools`).
-  - Сохранение последних 12 сообщений без искажений и умное уплотнение старой середины диалога.
-  - Автоматическое усечение гигантских дампов инструментов (`MAX_TOOL_OUTPUT_TOKENS = 25_000`).
-- 🛠️ **Полноценная поддержка Tool Use (Function Calling)**: Преобразование и парсинг вызовов инструментов для автономных код-агентов (**Cline**, **Roo Code**, **Cursor**, **Claude Code**, **Aider**).
-- 🔄 **Двойная совместимость API**:
-  - `POST /v1/chat/completions` — на 100% совместим со спецификацией **OpenAI API** (включая `reasoning_content` и `stream=True`).
-  - `POST /v1/messages` — совместим со спецификацией **Anthropic Messages API**.
-- 🛡️ **Режим `/proxy` (Live Agent Monitor)**: Встроенный инспектор запросов прямо в терминале — отображает ход мыслей (Thinking), вызовы инструментов и метрики генерации в реальном времени от подключенных агентов.
-- 🔒 **Выделенный порт `8317`**: Не конфликтует со стандартными портами локальной разработки (8000, 3000, 5000).
+</div>
 
 ---
 
-## 📋 Поддерживаемые модели
+## 🌟 核心特性
 
-| Модель ID | Провайдер | Описание |
-| :--- | :--- | :--- |
-| `deepseek-v4-pro` | **DeepSeek** | 1.6T MoE (49B active) — флагман для сложного кода и архитектуры |
-| `deepseek-v4-flash` | **DeepSeek** | 284B MoE — сверхбыстрая модель с минимальной задержкой |
-| `deepseek-reasoner` | **DeepSeek** | DeepSeek-R1 — пошаговые рассуждения и логический анализ |
-| `deepseek-chat` | **DeepSeek** | DeepSeek V3 — универсальный чат и решение задач |
-| `qwen3.7-plus` | **Qwen** | Актуальная флагманская веб-модель Qwen 3.7 Plus с рассуждениями |
-| `qwen-3.8-coder` | **Qwen** | Специализированная модель для разработки и рефакторинга |
-| `qwen-3.8` | **Qwen** | Qwen 3.8 флагман общего назначения |
-| `qwen-3-max` | **Qwen** | Максимальная вычислительная мощность Qwen |
-| `claude-3-7-sonnet` / `claude-3-5-sonnet` | **DeepSeek** | Автоматическая трансляция запросов Anthropic в DeepSeek V4 |
+- 🔓 **免费免 API Key 访问**：复用官方网页端会话，直接调用 DeepSeek 与 通义千问底层模型能力。
+- 👁️ **原生 Vision 视觉多模态支持**：
+  - 完整实现 Web 端文件上传、OCR 预处理、`fork_file_task` 视觉模型分支调度与 HIF（High-Integrity Framework）防篡改签名机制。
+  - 原生兼容 OpenAI 图像格式（`image_url`，支持 Base64 Data URI 与在线图片）及 Anthropic 图片块。
+  - 内置图片 SHA-256 缓存机制，多轮对话中避免重复上传相同图片。
+- 🛠️ **全功能自主工程 Agent 适配 (多做少说，行动优先)**：
+  - 系统提示词深度强化 Agent 执行力，严禁“只给建议不执行”、“口头承诺却不调工具”。
+  - 严密监控中英文行动意图声明，内置 `Continuation Recovery`（自动补全恢复机制）。
+  - 严格支持 `tool_choice` 参数（`auto`、`required`、强制指定工具）。
+  - 支持 DeepSeek 原生 DSML、标准 XML 及 JSON 等多种工具调用格式。
+- 📊 **全维度 Token 计量与缓存统计**：
+  - **输入 Token** (`prompt_tokens`)：基于多语言精确加权分词计算。
+  - **输出 Token** (`completion_tokens`)：直通官方真实生成计数。
+  - **上下文缓存读取** (`cached_tokens` / `cache_read_input_tokens`)：自动识别多轮会话重复前缀，精准呈现 Prompt Caching。
+  - **思考链统计** (`reasoning_tokens`)：单独计量思维链（Thinking）消耗。
+- 🧹 **网页会话自动垃圾回收 (Auto Clean Web Sessions)**：
+  - 彻底解决无状态 Agent 调用在 DeepSeek 网页端造成海量垃圾对话刷屏的问题。
+  - API 请求完成后由后台异步静默清理网页临时会话，用户网页左侧对话列表始终干净整洁。
+- ⚡ **毫秒级 WASM Proof-of-Work (PoW)**：
+  - 内置 WebAssembly `DeepSeekHashV1` 求解器，计算挑战耗时通常 < 50ms。
+- 🧠 **长上下文与自适应压缩器**：
+  - 智能安全截断与摘要压缩，确保复杂长任务不被 Web WAF 拦截。
+  - 100% 绝对保护系统设定与 Tools 工具定义不被截断。
+- 🔄 **OpenAI & Anthropic 双协议兼容**：
+  - `POST /v1/chat/completions`：100% 兼容 OpenAI 格式（含 `reasoning_content` 与 SSE 流式输出）。
+  - `POST /v1/messages`：兼容 Anthropic Claude 格式。
+- 🖥️ **交互式终端控制台 (`cli.py`)**：
+  - 支持浏览器一键免密登录捕获 Token、实时 Proxy 流量监控面板与交互测试。
 
 ---
 
-## 📦 Быстрый старт
+## 📋 支持模型列表
 
-### 1. Клонирование и установка зависимостей
+| 模型 ID | 提供商 | 描述 |
+| :--- | :---: | :--- |
+| `deepseek-v4-pro` | **DeepSeek** | 1.6T MoE (49B 激活参数) — 旗舰复杂编程、架构重构与深度逻辑分析 |
+| `deepseek-v4-flash` | **DeepSeek** | 284B MoE — 超高速对话模型，极低延迟 |
+| `deepseek-v4-flash-vision-exp` | **DeepSeek** | 视觉多模态模型 — 支持图表分析、截图提问与图像代码解析 |
+| `deepseek-reasoner` | **DeepSeek** | DeepSeek-R1 — 完整思维链 (Thinking) 输出的深度推理模型 |
+| `deepseek-chat` | **DeepSeek** | DeepSeek V3 — 综合通用任务模型 |
+| `deepseek-search` | **DeepSeek** | 内置实时联网搜索增强模式 |
+| `qwen3.7-plus` | **通义千问** | 旗舰 Web 模型，支持深度思考 |
+| `qwen-3.8-coder` | **通义千问** | 复杂软件工程代码专项模型 |
+| `qwen-3.8` | **通义千问** | 第 3 代千问通用旗舰大模型 |
 
-```bash
-git clone https://github.com/centralvii/deepseek-free-api.git
-cd deepseek-free-api
+---
 
-# Установка Python-библиотек
-pip install -r requirements.txt
+## 📦 快速部署与启动
 
-# Установка браузера Chromium для автологина
-playwright install chromium
+### 方式一：Docker Compose 部署 (推荐)
+
+创建 `docker-compose.yml`：
+
+```yaml
+services:
+  deepseek-free-api:
+    image: deepseek-free-api:local
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8317:8317"
+    volumes:
+      - ./credentials:/root/.deepseek
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8317"
+      DEBUG: "false"
+      REQUEST_TIMEOUT: "180.0"
+      PROXY_MODE: "multi"
+      AUTO_CLEAN_WEB_SESSIONS: "true"
+      MAX_CONTEXT_TOKENS: "300000"
 ```
 
-> **Примечание:** Для решения PoW требуется установленный [Node.js](https://nodejs.org/) (версии 16+).
-
----
-
-### 2. Авторизация (Автоматический вход)
-
-Запустите консольный клиент:
+启动服务：
 ```bash
+docker compose up -d --build
+```
+
+### 方式二：本地 Python 运行
+
+```bash
+# 1. 克隆代码并安装依赖
+git clone https://github.com/your-repo/deepseek-free-api.git
+cd deepseek-free-api
+pip install -r requirements.txt
+
+# 2. 安装浏览器依赖 (仅用于命令行自动登录)
+playwright install chromium
+
+# 3. 启动命令行工具或服务
 python cli.py
 ```
 
-В консоли введите команду авторизации:
+---
+
+## 🔑 获取与配置凭证
+
+### 1. 自动提取 (推荐)
+运行控制台：
+```bash
+python cli.py
+```
+在控制台中输入：
 ```text
 /login deepseek
 ```
-*или для Qwen:*
-```text
-/login qwen
-```
+系统将自动调起 Chrome 或 Edge 浏览器窗口，登录后脚本将**自动拦截 JWT Token** 并保存至 `credentials.json`！
 
-1. Откроется окно браузера с официальной страницей входа.
-2. Войдите в свой аккаунт (через Google, GitHub, Email или Телефон).
-3. Токен и сессия перехватятся **автоматически**, окно закроется, а токен сохранится в `credentials.json`!
+### 2. 手动配置
+登录 [chat.deepseek.com](https://chat.deepseek.com)，按 F12 打开开发者工具：
+- 在 **Application -> Local Storage** 中找到 `userToken`；
+- 或在 **Network** 选项卡查看任一 `/api/v0/...` 请求中的 `Authorization: Bearer <token>` 请求头。
 
-*(Вы также можете ввести токен вручную командой `/token deepseek <токен>` или `/token qwen <токен>`)*.
-
----
-
-## 🖥️ Использование интерактивной консоли (`cli.py`)
-
-Интерактивный терминал поддерживает автодополнение команд по **Tab**, подсветку синтаксиса, стриминг мыслей модели и управление сессиями:
-
-```text
-/proxy              - Перейти в режим Proxy-монитора для код-агентов (Cline, Roo, Cursor)
-/login [провайдер]  - Автоматический вход через окно браузера
-/provider <id>      - Переключить активного провайдера (deepseek, qwen)
-/model <name>       - Сменить модель (например, /model qwen-3.8-coder)
-/think [show|hide]  - Показывать или скрывать блок рассуждений (Thinking)
-/search [on|off]    - Включить веб-поиск в реальном времени
-/new                - Начать новый чат со сбросом контекста
-/sessions           - Список предыдущих диалогов
-/session <ID>       - Переключиться на диалог по ID
-/status             - Панель состояния провайдеров и токенов
-/clear              - Очистить экран
-/exit               - Выйти из консоли
-```
-
----
-
-## 🤖 Подключение AI-агентов (Cline, Roo Code, Cursor, OpenCode)
-
-### Режим Proxy-инспектора в реальном времени
-
-В консоли `cli.py` введите:
-```text
-/proxy
-```
-Сервер автоматически запустится на **`http://127.0.0.1:8317`** и перейдет в режим живого мониторинга всех запросов от агентов.
-
----
-
-### Настройка в **Cline** / **Roo Code** (VS Code расширения)
-
-1. Откройте настройки расширения **Cline** (шестеренка в правом верхнем углу).
-2. Выберите **API Provider**: `OpenAI Compatible`.
-3. Укажите:
-   - **Base URL**: `http://127.0.0.1:8317/v1`
-   - **API Key**: `deepseek` *(любое значение)*
-   - **Model ID**: `deepseek-v4-pro` *(или `qwen-3.8-coder` / `deepseek-reasoner`)*
-4. Нажмите **Done**. Теперь Cline пишет код, выполняет команды терминала и создает файлы через бесплатный шлюз!
-
-*(При использовании Anthropic совместимого режима укажите Base URL `http://127.0.0.1:8317` и выберите провайдер `Anthropic`)*.
-
----
-
-### Настройка в **Cursor**
-
-1. Откройте **Settings** -> **Models** -> **OpenAI API Key**.
-2. Включите галочку **Override OpenAI Base URL**.
-3. Укажите: `http://127.0.0.1:8317/v1`
-4. Добавьте модель: `deepseek-v4-pro` или `deepseek-reasoner`.
-
----
-
-## 🐍 Использование через OpenAI Python SDK
-
-```python
-from openai import OpenAI
-
-client = OpenAI(
-    base_url="http://127.0.0.1:8317/v1",
-    api_key="deepseek",  # Любая непустая строка
-)
-
-response = client.chat.completions.create(
-    model="deepseek-v4-pro",
-    messages=[
-        {"role": "system", "content": "Ты опытный Python-разработчик."},
-        {"role": "user", "content": "Напиши асинхронный генератор для чтения больших файлов."},
-    ],
-    stream=True,
-)
-
-for chunk in response:
-    # Блок рассуждений модели (DeepSeek-R1 / Qwen Thinking)
-    if chunk.choices[0].delta.reasoning_content:
-        print(chunk.choices[0].delta.reasoning_content, end="", flush=True)
-    # Основной сгенерированный ответ
-    if chunk.choices[0].delta.content:
-        print(chunk.choices[0].delta.content, end="", flush=True)
-```
-
----
-
-## 🌐 Запуск отдельного API-сервера
-
-Если вам требуется запустить сервер в качестве фоновой службы (без CLI):
-
+通过 API 录入：
 ```bash
-python -m uvicorn app.main:app --host 0.0.0.0 --port 8317 --reload
-```
-
-- **Swagger UI (Интерактивная документация)**: [http://127.0.0.1:8317/docs](http://127.0.0.1:8317/docs)
-- **ReDoc**: [http://127.0.0.1:8317/redoc](http://127.0.0.1:8317/redoc)
-- **Health Check**: [http://127.0.0.1:8317/health](http://127.0.0.1:8317/health)
-
----
-
-## ⚙️ Конфигурация (.env)
-
-Вы можете настроить параметры в файле `.env`:
-
-```env
-# Параметры сервера
-HOST=0.0.0.0
-PORT=8317
-DEBUG=false
-
-# Параметры контекстного компрессора (1M окно токенов)
-MAX_CONTEXT_TOKENS=300000
-CONTEXT_COMPRESSION_ENABLED=true
-RETAIN_RECENT_MESSAGES_COUNT=12
-MAX_TOOL_OUTPUT_TOKENS=25000
-
-# Сетевые таймауты
-REQUEST_TIMEOUT=180.0
+curl -X POST http://127.0.0.1:8317/api/v1/auth/token \
+  -H "Content-Type: application/json" \
+  -d '{"provider": "deepseek", "token": "YOUR_TOKEN"}'
 ```
 
 ---
 
-## 🧪 Запуск тестов
+## 🤖 AI 编程客户端接入配置
 
-Проект полностью покрыт автоматическими тестами (мульти-провайдеры, PoW солвер, парсер SSE, Anthropic/OpenAI конвертеры, сжатие контекста):
+### 接入 OpenCode
 
-```bash
-python -m pytest tests/
+在 `~/.config/opencode/opencode.json` 中配置：
+
+```json
+{
+  "provider": {
+    "deepseek-local": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "DeepSeek Free API",
+      "options": {
+        "baseURL": "http://127.0.0.1:8317/v1",
+        "apiKey": "test-key"
+      },
+      "models": {
+        "deepseek-v4-pro": {
+          "name": "DeepSeek V4 Pro",
+          "limit": { "context": 300000, "output": 128000 }
+        },
+        "deepseek-v4-flash-vision-exp": {
+          "name": "DeepSeek V4 Vision",
+          "limit": { "context": 300000, "output": 128000 }
+        }
+      }
+    }
+  }
+}
 ```
+
+### 接入 Cline / Roo Code / Cursor
+
+- **API Provider**: `OpenAI Compatible`
+- **Base URL**: `http://127.0.0.1:8317/v1`
+- **API Key**: `test-key` (填入任意非空字符串)
+- **Model ID**: `deepseek-v4-pro` 或 `deepseek-v4-flash-vision-exp`
 
 ---
 
-## 📄 Лицензия
+## ⚙️ 环境变量说明
 
-Проект распространяется под лицензией MIT. Создан исключительно в образовательных и исследовательских целях.
+| 变量名 | 默认值 | 说明 |
+| :--- | :--- | :--- |
+| `HOST` | `0.0.0.0` | 监听主机地址 |
+| `PORT` | `8317` | 监听端口 |
+| `REQUEST_TIMEOUT` | `180.0` | 上游网络请求超时时间 (秒) |
+| `PROXY_MODE` | `multi` | 会话隔离模式 (`multi` 每请求独立临时会话 / `single` 单会话) |
+| `AUTO_CLEAN_WEB_SESSIONS` | `true` | 请求完成后是否在后台静默删除网页端临时会话 |
+| `MAX_CONTEXT_TOKENS` | `300000` | 触发自适应上下文压缩的安全阈值 |
+| `MAX_TOOL_OUTPUT_TOKENS` | `25000` | 单个工具执行结果截断上限 |
+
+---
+
+## 📄 开源许可证
+
+本项目基于 [MIT License](LICENSE) 开源发布，仅供技术研究与学习使用。

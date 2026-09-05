@@ -8,12 +8,12 @@ from app.services.session_manager import session_manager
 router = APIRouter(prefix="/api/v1/sessions", tags=["Sessions"])
 
 
-@router.post("/new", summary="Создать новую чат-сессию (начать диалог заново)")
+@router.post("/new", summary="创建新会话 (重新开始对话)")
 async def create_new_session(
     client: Annotated[httpx.AsyncClient, Depends(get_http_client)],
-    provider: Optional[str] = Query(None, description="ID провайдера (deepseek, qwen, glm)"),
+    provider: Optional[str] = Query(None, description="提供商 ID (deepseek, qwen, glm)"),
 ) -> Dict[str, Any]:
-    """Создает новую сессию на серверах выбранного провайдера и сбрасывает текущий контекст."""
+    """在指定提供商服务端创建新会话并重置本地上下文。"""
     target_provider = provider_registry.get_provider(provider)
 
     if target_provider.provider_id == "qwen":
@@ -26,13 +26,13 @@ async def create_new_session(
         "status": "success",
         "provider": target_provider.provider_id,
         "session_id": session_id,
-        "message": f"Новая сессия успешно создана ({target_provider.display_name})",
+        "message": f"新会话创建成功 ({target_provider.display_name})",
     }
 
 
-@router.get("/current", summary="Получить ID текущей активной сессии")
+@router.get("/current", summary="获取当前活跃会话 ID")
 async def get_current_session(
-    provider: Optional[str] = Query(None, description="ID провайдера (deepseek, qwen, glm)"),
+    provider: Optional[str] = Query(None, description="提供商 ID (deepseek, qwen, glm)"),
 ) -> Dict[str, Any]:
     target_provider = provider_registry.get_provider(provider)
     current_id = target_provider.get_current_session_id()
@@ -42,58 +42,57 @@ async def get_current_session(
         "provider": target_provider.provider_id,
         "session_id": current_id,
         "parent_message_id": parent_id,
-        "has_active_session": bool(current_id),
+        "active": current_id is not None,
     }
 
 
-@router.get("/list", summary="Список доступных сессий/диалогов провайдера")
-async def list_sessions(
-    provider: Optional[str] = Query(None, description="ID провайдера (deepseek, qwen, glm)"),
+@router.get("/list", summary="获取提供商的可用历史会话列表")
+async def list_provider_sessions(
+    provider: Optional[str] = Query(None, description="提供商 ID (deepseek, qwen, glm)"),
 ) -> Dict[str, Any]:
-    """Возвращает список существующих чатов с серверов провайдера."""
+    """返回提供商服务端的历史对话列表。"""
     target_provider = provider_registry.get_provider(provider)
     sessions = await target_provider.list_sessions()
     return {
         "provider": target_provider.provider_id,
-        "count": len(sessions),
         "sessions": sessions,
+        "count": len(sessions),
     }
 
 
-@router.post("/reset", summary="Сбросить локальный контекст сессии")
-async def reset_session(
-    provider: Optional[str] = Query(None, description="ID провайдера (deepseek, qwen, glm)"),
+@router.post("/reset", summary="重置本地会话上下文")
+async def reset_session_context(
+    provider: Optional[str] = Query(None, description="提供商 ID (deepseek, qwen, glm)"),
 ) -> Dict[str, Any]:
     target_provider = provider_registry.get_provider(provider)
     target_provider.reset_session()
     return {
         "status": "success",
         "provider": target_provider.provider_id,
-        "message": "Текущий контекст сброшен. Следующий запрос создаст новую сессию.",
+        "message": "当前上下文已重置，下一条请求将创建全新会话。",
     }
 
 
-@router.get("/mode", summary="Получить текущий режим сессий (single или multi)")
+@router.get("/mode", summary="获取当前会话模式 (single 或 multi)")
 async def get_session_mode() -> Dict[str, Any]:
-    """Возвращает информацию о текущем режиме прокси: single (единая сессия) или multi (новый чат на запрос)."""
+    """返回代理当前会话模式: single (单会话复用) 或 multi (每请求独立临时会话)。"""
     return {
         "mode": "single" if session_manager.is_single_session_mode() else "multi",
         "single_session_mode": session_manager.is_single_session_mode(),
-        "description": "Единая сессия без создания новых чатов" if session_manager.is_single_session_mode() else "Изолированные чаты на каждый запрос",
+        "description": "单会话复用模式" if session_manager.is_single_session_mode() else "每请求独立隔离会话 (防止上下文膨胀)",
     }
 
 
-@router.post("/mode", summary="Переключить режим сессий")
+@router.post("/mode", summary="切换会话模式")
 async def set_session_mode(
-    mode: str = Query(..., description="Режим сессий: 'single' (единая сессия) или 'multi' (изолированные чаты)"),
+    mode: str = Query(..., description="会话模式: 'single' (单会话) 或 'multi' (隔离会话)"),
 ) -> Dict[str, Any]:
-    """Переключает режим сессий: 'single' (без создания новых чатов) или 'multi'."""
+    """切换会话模式: 'single' 或 'multi'。"""
     is_single = mode.strip().lower() in ["single", "1", "true", "s"]
     session_manager.set_single_session_mode(is_single)
     return {
         "status": "success",
         "mode": "single" if is_single else "multi",
         "single_session_mode": is_single,
-        "message": f"Режим успешно изменен на: {'single (единая сессия)' if is_single else 'multi (изолированные чаты)'}",
+        "message": f"会话模式已成功修改为: {'single (单会话复用)' if is_single else 'multi (独立隔离会话)'}",
     }
-

@@ -10,53 +10,57 @@ logger = logging.getLogger(__name__)
 
 
 class ProviderRegistry:
-    """Центральный реестр и диспетчер LLM-провайдеров."""
+    """LLM 提供商中央注册与调度分发器。"""
 
     def __init__(self):
         self._providers: Dict[str, BaseLLMProvider] = {}
         self.default_provider_id: str = "deepseek"
 
     def init_providers(self, http_client: httpx.AsyncClient) -> None:
-        """Инициализирует доступных провайдеров с общим HTTP клиентом."""
+        """初始化可用提供商及其共享 HTTP 客户端。"""
         self._providers["deepseek"] = DeepSeekProvider(http_client)
         self._providers["qwen"] = QwenProvider(http_client)
 
     def get_provider(self, provider_id: Optional[str] = None) -> BaseLLMProvider:
-        """Возвращает провайдера по ID или провайдера по умолчанию."""
+        """按 ID 返回提供商或返回默认提供商。"""
         pid = (provider_id or self.default_provider_id).lower().strip()
         if pid not in self._providers:
-            raise KeyError(f"Неизвестный провайдер '{pid}'. Доступные: {list(self._providers.keys())}")
+            raise KeyError(f"未知的提供商 '{pid}'。可用提供商: {list(self._providers.keys())}")
         return self._providers[pid]
 
     def set_default_provider(self, provider_id: str) -> None:
         pid = provider_id.lower().strip()
         if pid not in self._providers:
-            raise ValueError(f"Неизвестный провайдер '{pid}'. Доступные: {list(self._providers.keys())}")
+            raise ValueError(f"未知的提供商 '{pid}'。可用提供商: {list(self._providers.keys())}")
         self.default_provider_id = pid
-        logger.info(f"Активный провайдер по умолчанию изменен на: {pid}")
+        logger.info(f"当前默认提供商已变更为: {pid}")
 
     def resolve_provider_for_model(self, model_name: str) -> BaseLLMProvider:
         """
-        Автоматически определяет нужного провайдера по имени модели:
+        根据模型名称自动推断对应的提供商:
         - qwen-... -> Qwen
-        - deepseek-..., r1, chat, search, etc. -> DeepSeek (или default_provider)
+        - glm-... -> GLM
+        - deepseek-..., r1, chat, search 等 -> DeepSeek
         """
-        m_lower = model_name.lower().strip()
+        m = (model_name or "").lower().strip()
 
-        if m_lower.startswith("qwen") or "qwen-" in m_lower or m_lower in ["3.8", "qwen3"]:
-            return self._providers["qwen"]
+        if m.startswith("qwen") or "tongyi" in m:
+            if "qwen" in self._providers:
+                return self._providers["qwen"]
+        elif m.startswith("glm") or "zhipu" in m:
+            if "glm" in self._providers:
+                return self._providers["glm"]
 
-        if m_lower.startswith("deepseek") or m_lower in ["r1", "reasoner", "expert", "v4-pro", "v4-flash", "v4-vision"]:
+        if "deepseek" in self._providers:
             return self._providers["deepseek"]
 
-        # Если не совпало ни с одним префиксом, используем текущего провайдера по умолчанию
         return self.get_provider(self.default_provider_id)
 
     def get_all_models(self) -> List[ModelInfo]:
-        """Возвращает общий объединенный список моделей всех провайдеров."""
-        all_models: List[ModelInfo] = []
-        for prov in self._providers.values():
-            all_models.extend(prov.get_models())
+        """返回所有提供商的模型聚合列表。"""
+        all_models = []
+        for p in self._providers.values():
+            all_models.extend(p.get_models())
         return all_models
 
     def list_providers(self) -> List[Dict[str, str]]:

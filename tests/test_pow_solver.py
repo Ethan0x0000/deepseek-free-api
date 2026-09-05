@@ -19,4 +19,4 @@ async def test_pow_solver_wasm():
         assert isinstance(res, str)
         assert len(res) > 0
     except RuntimeError as e:
-        assert "Не удалось найти решение PoW" in str(e)
+        assert "未找到" in str(e) or "PoW" in str(e)

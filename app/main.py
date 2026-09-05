@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    logger.info(f"Запуск {settings.APP_NAME} v{settings.APP_VERSION}")
+    logger.info(f"启动 {settings.APP_NAME} v{settings.APP_VERSION}")
     app.state.http_client = httpx.AsyncClient(
         timeout=settings.REQUEST_TIMEOUT,
         follow_redirects=True,
@@ -29,15 +29,15 @@ async def lifespan(app: FastAPI):
 
     active_providers = [p["name"] for p in provider_registry.list_providers() if p["authenticated"]]
     if active_providers:
-        logger.info(f"Активные провайдеры с токенами: {', '.join(active_providers)}")
+        logger.info(f"已就绪的提供商 (已配置 Token): {', '.join(active_providers)}")
     else:
         logger.warning(
-            "ВНИМАНИЕ: Учетные данные провайдеров не найдены. Сохраните токен через /api/v1/auth/token или credentials.json."
+            "提示: 未检测到提供商认证 Token。请通过 /api/v1/auth/token 接口或 credentials.json 配置。"
         )
 
     yield
 
-    logger.info("Остановка приложения, закрытие сетевых соединений...")
+    logger.info("关闭服务，释放网络连接池...")
     await app.state.http_client.aclose()
 
 

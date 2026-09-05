@@ -1,8 +1,6 @@
 import json
 import logging
-import re
-from typing import Any, Dict, List, Optional, Union
-
+from typing import List, Optional, Union, Any
 from app.core.config import settings
 from app.schemas.openai import OpenAIChatMessage
 
@@ -11,12 +9,10 @@ logger = logging.getLogger(__name__)
 
 def estimate_tokens(text: Union[str, Any]) -> int:
     """
-    Быстрая и точная оценка количества токенов для многоязычного текста, кода и JSON.
-    Учитывает:
-    - Английский текст и код: ~3.6 символа на токен
-    - Кириллица / Русский: ~1.8 символа на токен
-    - Китайские иероглифы (CJK): ~1.3-1.4 символа на токен
-    - Пробелы и спецсимволы
+    快速准确评估多语言文本、代码和 JSON 的 Token 数量。
+    - 英文与代码: ~3.6 字符 / Token
+    - 中文汉字 (CJK) / 常见符号: ~1.4 字符 / Token
+    - 空格与特殊符号综合加权
     """
     if not text:
         return 0
@@ -27,48 +23,49 @@ def estimate_tokens(text: Union[str, Any]) -> int:
     if length == 0:
         return 0
 
-    # Подсчет символов не-ASCII (кириллица, CJK)
     non_ascii_count = sum(1 for c in text if ord(c) > 127)
     ascii_count = length - non_ascii_count
 
-    # Оценка: ASCII ~ 3.6 символов/токен, Non-ASCII (CJK/Кириллица) ~ 1.4 символов/токен
     tokens = int((ascii_count / 3.6) + (non_ascii_count / 1.4))
     return max(1, tokens)
 
 
 def truncate_tool_output(content: str, max_tokens: int = 25_000) -> str:
     """
-    Сжимает гигантские выводы инструментов (дампы файлов, большие логи),
-    сохраняя начало (Head) и конец (Tail) вывода.
+    截断超长工具执行输出（如大型文件日志、超大目录列表），
+    保留头部（Head）与尾部（Tail），确保关键错误与开头信息不丢失。
     """
     current_tokens = estimate_tokens(content)
     if current_tokens <= max_tokens:
         return content
 
-    # Оставляем 40% сверху и 40% снизу, вырезаем середину
-    target_char_len = int(max_tokens * 3.0)
-    head_len = int(target_char_len * 0.45)
-    tail_len = int(target_char_len * 0.45)
+    # 保留前 40% 与后 40%，中间裁剪
+    budget_chars = int(max_tokens * 3.2)
+    head_len = int(budget_chars * 0.45)
+    tail_len = int(budget_chars * 0.45)
+
+    if head_len + tail_len >= len(content):
+        return content
 
     head = content[:head_len]
     tail = content[-tail_len:]
     omitted_chars = len(content) - (head_len + tail_len)
-    omitted_tokens = int(omitted_chars / 3.0)
+    omitted_tokens = int(omitted_chars / 3.2)
 
     return (
         f"{head}\n\n"
-        f"[... ⚠️ Контекстный компрессор: пропущено {omitted_chars:,} символов (~{omitted_tokens:,} токенов) середины вывода ...]\n\n"
+        f"[... Context compressed: omitted {omitted_chars:,} characters (~{omitted_tokens:,} tokens) of output ...]\n\n"
         f"{tail}"
     )
 
 
 class ContextCompressor:
     """
-    Интеллектуальный менеджер сжатия контекста:
-    - Следит за лимитом ~300,000 токенов (из окна в 1,000,000).
-    - Гарантированно сохраняет системные инструкции и tools.
-    - Гарантированно сохраняет последние N сообщений диалога с полной детализацией.
-    - Сжимает / уплотняет старую середину диалога и гигантские выводы инструментов.
+    智能上下文压缩器:
+    - 监控提供商的安全 Token 预算与 UTF-8 Payload 大小
+    - 100% 完整保留系统指令和 Tools 工具定义
+    - 完整保留最近 N 轮对话历史
+    - 对过长历史中间部分进行无损摘要与压缩
     """
 
     QWEN_MAX_WEB_TOKENS: int = 20_000
@@ -88,7 +85,7 @@ class ContextCompressor:
         self.max_tool_tokens = max_tool_tokens or getattr(settings, "MAX_TOOL_OUTPUT_TOKENS", 25_000)
 
     def get_limit_for_provider(self, provider_id: str) -> int:
-        """Возвращает безопасный лимит токенов контекста для конкретного провайдера."""
+        """返回指定提供商的安全 Token 上限。"""
         pid = str(provider_id).lower().strip()
         if pid == "qwen":
             return self.QWEN_MAX_WEB_TOKENS
@@ -101,48 +98,45 @@ class ContextCompressor:
         messages: List[OpenAIChatMessage],
         max_tokens: Optional[int] = None,
     ) -> List[OpenAIChatMessage]:
-        """Сжимает список сообщений OpenAI до допустимого бюджета токенов."""
+        """将 OpenAI 消息列表压缩到指定 Token 预算内。"""
         if not messages:
             return messages
 
         limit = max_tokens or self.max_context_tokens
         tool_limit = min(self.max_tool_tokens, max(2_000, limit // 5))
-        
-        # 1. Сначала сжимаем гигантские tool выводы
+
+        # 1. 优先压缩过大 tool 输出
         sanitized_messages: List[OpenAIChatMessage] = []
         for msg in messages:
             if msg.role in ["tool", "function"] and isinstance(msg.content, str):
                 compressed_content = truncate_tool_output(msg.content, max_tokens=tool_limit)
                 if compressed_content != msg.content:
-                    # Создаем копию с усеченным контентом
                     msg_dict = msg.model_dump()
                     msg_dict["content"] = compressed_content
                     sanitized_messages.append(OpenAIChatMessage(**msg_dict))
                     continue
             sanitized_messages.append(msg)
 
-        # 2. Оцениваем общий объем
+        # 2. 评估总 Token
         total_tokens = sum(estimate_tokens(m.content or "") for m in sanitized_messages)
         if total_tokens <= limit:
             return sanitized_messages
 
         logger.info(
-            f"Контекст диалога ({total_tokens:,} токенов) превысил порог {limit:,}. "
-            f"Запуск интеллектуального сжатия..."
+            f"对话上下文 ({total_tokens:,} Token) 超出阈值 {limit:,}，启动智能压缩..."
         )
 
-        # 3. Разделяем на системные, старую середину и свежие сообщения
+        # 3. 分离系统提示、历史中间段与最近活跃消息
         system_msgs = [m for m in sanitized_messages if m.role == "system"]
         non_system_msgs = [m for m in sanitized_messages if m.role != "system"]
 
         if len(non_system_msgs) <= self.retain_recent_count:
-            # Слишком мало сообщений для разделения, просто возвращаем
             return sanitized_messages
 
         recent_msgs = non_system_msgs[-self.retain_recent_count:]
         middle_msgs = non_system_msgs[:-self.retain_recent_count]
 
-        # 4. Формируем сжатую сводку старой середины диалога
+        # 4. 汇总压缩中间历史段
         summary_lines = []
         for m in middle_msgs:
             role = m.role
@@ -163,7 +157,7 @@ class ContextCompressor:
 
         result = system_msgs + [summary_msg] + recent_msgs
         new_tokens = sum(estimate_tokens(m.content or "") for m in result)
-        logger.info(f"✓ Контекст успешно сжат: с {total_tokens:,} до {new_tokens:,} токенов.")
+        logger.info(f"✓ 上下文成功压缩: 从 {total_tokens:,} 降至 {new_tokens:,} Token。")
         return result
 
     def compress_raw_prompt(
@@ -172,10 +166,7 @@ class ContextCompressor:
         max_tokens: Optional[int] = None,
         max_bytes: Optional[int] = None,
     ) -> str:
-        """Сжимает текстовый промпт по токенам и байтам UTF-8 для безопасного прохождения веб-WAF."""
-        if not prompt:
-            return prompt
-
+        """针对底层文本的兜底安全截断与压缩，确保不触发 WAF 阻断。"""
         limit = max_tokens or self.max_context_tokens
         curr_tokens = estimate_tokens(prompt)
         prompt_bytes = len(prompt.encode("utf-8"))
@@ -190,20 +181,17 @@ class ContextCompressor:
             return prompt
 
         logger.info(
-            f"Промпт ({curr_tokens:,} токенов, {prompt_bytes:,} байт) превысил лимит "
-            f"({limit:,} ток., {effective_max_bytes or 'unlimited'} байт). Применяется адаптивное сжатие..."
+            f"提示词 ({curr_tokens:,} Token, {prompt_bytes:,} 字节) 超过安全限制 "
+            f"({limit:,} Token, {effective_max_bytes} 字节)。应用自适应压缩..."
         )
 
-        # Вычисляем целевой размер в символах с учетом байтовой плотности кодировки (UTF-8)
         bytes_per_char = max(1.0, prompt_bytes / max(1, len(prompt)))
         if effective_max_bytes and prompt_bytes > effective_max_bytes:
             target_char_len = int((effective_max_bytes - 800) / bytes_per_char)
         else:
             target_char_len = int(limit * 3.0 / bytes_per_char)
 
-        # 1. Приоритетное сжатие истории: если в промпте есть блок истории диалога,
-        # системные инструкции и блок доступных инструментов (# Available Tools / # Tool Call Instructions)
-        # сохраняются ПОЛНОСТЬЮ без обрезки!
+        # 优先压缩 Conversation History 块，完整保留系统指令和 Tools
         for marker in ["\nConversation History:\n", "\n\nConversation History:\n", "Conversation History:\n"]:
             if marker in prompt:
                 header, history = prompt.split(marker, 1)
@@ -211,7 +199,6 @@ class ContextCompressor:
                 header_bytes = len(header_with_marker.encode("utf-8"))
                 remaining_bytes = (effective_max_bytes - 800) - header_bytes if effective_max_bytes else (target_char_len - len(header_with_marker))
 
-                # Если под историю остается разумный бюджет (> 3000 байт/символов)
                 if remaining_bytes > 3000:
                     h_bytes_per_char = max(1.0, len(history.encode("utf-8")) / max(1, len(history)))
                     h_target_chars = int(remaining_bytes / h_bytes_per_char)
@@ -229,7 +216,7 @@ class ContextCompressor:
                             f"{h_tail}"
                         )
 
-        # 2. Общий fallback для произвольного сырого текста без маркеров истории
+        # 兜底压缩
         head_chars = int(target_char_len * 0.35)
         tail_chars = int(target_char_len * 0.55)
 

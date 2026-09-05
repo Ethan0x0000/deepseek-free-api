@@ -7,10 +7,10 @@ from app.schemas.openai import OpenAIChatMessage, OpenAITool, OpenAIToolCall, Op
 
 def compact_tool_schema(value: Any, is_root: bool = True) -> Any:
     """
-    Компактизирует JSON Schema параметров инструмента:
-    - Удаляет избыточные метаданные (title, $comment, verbose examples).
-    - Сохраняет валидационную структуру (type, properties, required, enum, const, items).
-    - Сокращает чрезмерно длинные описания параметров (>120 симв.).
+    精简工具参数的 JSON Schema 结构：
+    - 移除冗余元数据 (title, $comment, verbose examples)
+    - 保留核心验证结构 (type, properties, required, enum, const, items)
+    - 截断过长的参数描述 (>120 字符)
     """
     if isinstance(value, list):
         return [compact_tool_schema(item, is_root=False) for item in value]
@@ -40,7 +40,7 @@ def build_tool_system_prompt(
     tools: List[OpenAITool],
     tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
 ) -> str:
-    """Формирует системную инструкцию с описанием доступных инструментов."""
+    """生成包含可用工具定义的系统指令。"""
     if tool_choice == "none":
         return ""
 
@@ -172,22 +172,21 @@ def format_messages_to_prompt(
     tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
 ) -> str:
     """
-    Преобразует историю сообщений OpenAI (system, user, assistant, tool)
-    в единый контекстный промпт для веб-интерфейса DeepSeek/Qwen.
-    Автоматически применяет сжатие контекста при превышении лимита токенов.
+    将 OpenAI 消息历史 (system, user, assistant, tool) 编译为 Web 端统一提示词。
+    在超出 Token 预算时自动执行上下文压缩。
     """
     from app.services.context_compressor import context_compressor
     compressed_messages = context_compressor.compress_openai_messages(messages, max_tokens=max_tokens)
 
     prompt_parts = []
 
-    # 1. Если переданы tools, добавляем системную инструкцию по инструментам
+    # 1. 如果提供了 tools，添加工具调用系统指令
     if tools:
         tool_instruction = build_tool_system_prompt(tools, tool_choice=tool_choice)
         if tool_instruction:
             prompt_parts.append(tool_instruction)
 
-    # 2. Обрабатываем системные и пользовательские сообщения
+    # 2. 处理系统消息与历史对话
     system_messages = []
     history_messages = []
 
@@ -195,7 +194,7 @@ def format_messages_to_prompt(
         role = msg.role
         content = msg.content or ""
         if isinstance(content, list):
-            # Если переданы multipart сообщения (текст + изображения)
+            # 兼容 multipart 格式 (文本 + 图片附件)
             text_pieces = []
             for piece in content:
                 if isinstance(piece, dict):
@@ -232,8 +231,7 @@ def format_messages_to_prompt(
     if history_messages:
         prompt_parts.append("\nConversation History:\n" + "\n".join(history_messages))
 
-    # 3. Если последнее сообщение — вывод инструмента (tool output),
-    # требуем продолжить цикл выполнения агента до полного завершения задачи
+    # 3. 如果上一条是工具执行结果，指令模型立即分析并执行下一步工具调用，直到任务彻底完成
     if compressed_messages and compressed_messages[-1].role in ["tool", "function"]:
         prompt_parts.append(
             "\n[Autonomous Directive: The tool execution result is provided above. Proceed with the task immediately. "
@@ -241,7 +239,7 @@ def format_messages_to_prompt(
             "<tool_call>{\"name\": \"...\", \"arguments\": {...}}</tool_call>. "
             "DO NOT stop halfway with an intermediate conversational summary. Work relentlessly until the user's objective is 100% completed!]"
         )
-    # 4. Если переданы tools и последнее сообщение от пользователя, требуем действия вместо советов
+    # 4. 如果提供了 tools 且最后一条是用户指令，注入行动优先指令
     elif tools and compressed_messages and compressed_messages[-1].role == "user":
         prompt_parts.append(
             "\n[Autonomous Directive: Tools are available. Action over words: If answering this request requires inspecting files, exploring directories, searching code, or executing commands, invoke the tool call directly in this turn: <tool_call>{\"name\": \"...\", \"arguments\": {...}}</tool_call>. "
@@ -255,23 +253,23 @@ def format_messages_to_prompt(
 
 
 def normalize_qwen_parameter_tags(text: str) -> str:
-    """Нормализует гибридные теги параметров Qwen (<parameter=key>...</parameter>) в валидный JSON."""
+    """标准化 Qwen 参数标签 (<parameter=key>...</parameter>) 为标准 JSON。"""
     if not text or "parameter" not in text:
         return text
-    # 1. Замена перехода между параметрами: </parameter>\n<parameter=key> -> ", "key": 
+    # 1. 替换参数间过渡
     normalized = re.sub(r'\s*</parameter>\s*<parameter=([a-zA-Z0-9_\-]+)>\s*', r'", "\1": ', text)
-    # 2. Замена одиночного </parameter> -> "
+    # 2. 替换单独闭合标签
     normalized = re.sub(r'\s*</parameter>', r'"', normalized)
-    # 3. Замена одиночного <parameter=key> -> "key": 
+    # 3. 替换起始标签
     normalized = re.sub(r'<parameter=([a-zA-Z0-9_\-]+)>\s*', r'"\1": ', normalized)
     return normalized
 
 
 def _parse_broken_arguments(args_str: str) -> Dict[str, Any]:
     """
-    Устойчивый парсер аргументов инструмента:
-    - Восстанавливает JSON с неэкранированными внутренними кавычками (например, внутри shell-команд: echo "...", grep '...').
-    - Извлекает ключи и значения через позиционный сплит пар.
+    容错参数解析器：
+    - 修复带有未转义内部引号的 JSON (如 shell 命令里的 echo "...", grep '...')
+    - 支持通过键值对位置切分提取字段
     """
     s = args_str.strip()
     if s.startswith("{") and s.endswith("}"):
@@ -317,7 +315,7 @@ def _parse_broken_arguments(args_str: str) -> Dict[str, Any]:
 
 
 def _parse_all_tool_json(raw_json: str) -> List[Tuple[str, str]]:
-    """Парсит все JSON-объекты (один или несколько параллельных) из блока tool_call."""
+    """解析 tool_call 块内的所有 JSON 对象 (支持单对象或并行多对象)。"""
     results: List[Tuple[str, str]] = []
     if not raw_json:
         return results
@@ -346,7 +344,7 @@ def _parse_all_tool_json(raw_json: str) -> List[Tuple[str, str]]:
             else:
                 break
 
-    # Fallback 1: стандартный json.loads
+    # 回退 1: 标准 json.loads
     if not results:
         try:
             data = json.loads(s, strict=False)
@@ -359,7 +357,7 @@ def _parse_all_tool_json(raw_json: str) -> List[Tuple[str, str]]:
         except Exception:
             pass
 
-    # Fallback 2: экранируем сырые переносы строк
+    # 回退 2: 转义原始换行符
     if not results:
         try:
             sanitized = re.sub(r'[\r\n]+', '\\n', s)
@@ -373,7 +371,7 @@ def _parse_all_tool_json(raw_json: str) -> List[Tuple[str, str]]:
         except Exception:
             pass
 
-    # Fallback 3: парсим поврежденный JSON с неэкранированными внутренними кавычками
+    # 回退 3: 正则提取被破坏的内部引号 JSON
     if not results:
         name_match = re.search(r'"(?:name|function)"\s*:\s*"([a-zA-Z0-9_\-\.]+)"', s)
         if name_match:
@@ -402,22 +400,19 @@ def _parse_all_tool_json(raw_json: str) -> List[Tuple[str, str]]:
 
 def extract_tool_calls(text: str) -> Tuple[str, List[OpenAIToolCall]]:
     """
-    Извлекает вызовы инструментов из ответа модели:
-    - Поддерживает один или несколько JSON-объектов внутри одного тега <tool_call>...</tool_call>.
-    - Поддерживает гибридные теги параметров Qwen (<parameter=key>...</parameter>).
-    - Поддерживает теги <tool_call>...</tool_call> (включая <tool_call"> и с атрибутами).
-    - Поддерживает markdown блоки ```tool_call...```.
-    - Поддерживает нативный формат Qwen <function=name>...</function>.
-    - Поддерживает многострочный код внутри аргументов (strict=False).
-    - Поддерживает неформатированные вызовы Edit/Write с путем к файлу и кодом.
-    - Выполняет дедупликацию идентичных вызовов.
-    Возвращает (очищенный_текст, список_tool_calls).
+    从模型输出内容中提取工具调用 (Tool Calls)：
+    - 支持单个或多个 JSON 对象封装在 <tool_call>...</tool_call> 内
+    - 支持 DeepSeek 官方 DSML 格式 (<|DSML|invoke name="...">...</|DSML|invoke>)
+    - 支持 Anthropic/Claude 格式 (<invoke name="...">...</invoke>)
+    - 支持 Qwen 原生标签格式 (<function=name>...</function>)
+    - 支持 Markdown 代码块语法 (```tool_call...```)
+    - 自动去重相同调用并返回 (清洗后的正文文本, 工具调用列表)
     """
     tool_calls: List[OpenAIToolCall] = []
     seen_calls = set()
     clean_text = text
 
-    # 0. Проверка формата DeepSeek DSML: <｜DSML｜tool_calls>...<｜DSML｜invoke name="...">...</｜DSML｜invoke>...</｜DSML｜tool_calls>
+    # 0. 检验 DeepSeek 原生 DSML 格式
     dsml_invoke_pat = r"<[｜\|]*\s*DSML\s*[｜\|]*invoke\s+name=[\"']?([^\"'>]+)[\"']?[^>]*>\s*(.*?)\s*</[｜\|]*\s*DSML\s*[｜\|]*invoke>"
     dsml_param_pat = r"<[｜\|]*\s*DSML\s*[｜\|]*parameter\s+name=[\"']?([^\"'>]+)[\"']?[^>]*>\s*(.*?)\s*</[｜\|]*\s*DSML\s*[｜\|]*parameter>"
 
@@ -452,7 +447,7 @@ def extract_tool_calls(text: str) -> Tuple[str, List[OpenAIToolCall]]:
     clean_text = re.sub(dsml_invoke_pat, "", clean_text, flags=re.DOTALL)
     clean_text = re.sub(r"</?[｜\|]*\s*DSML\s*[｜\|]*[^>]*>", "", clean_text)
 
-    # 1. Проверка формата Claude / Anthropic / DeepSeek: <invoke name="...">...</invoke>
+    # 1. 检验 Claude / Anthropic 格式: <invoke name="...">...</invoke>
     invoke_pat = r"<invoke\s+name=[\"']?([a-zA-Z0-9_\-\.]+)[\"']?[^>]*>\s*(.*?)\s*</invoke>"
     param_pat = r"<parameter\s+(?:name=[\"']?([a-zA-Z0-9_\-]+)[\"']?|=([a-zA-Z0-9_\-]+)|([a-zA-Z0-9_\-]+))[^>]*>\s*(.*?)\s*</parameter>"
 
@@ -483,11 +478,10 @@ def extract_tool_calls(text: str) -> Tuple[str, List[OpenAIToolCall]]:
                 )
             )
 
-    # Очищаем блоки invoke (включая если они обернуты в <tool_call>...<invoke>...</tool_calls>)
     clean_text = re.sub(r"<[｜\|]*\s*(?:DSML\s*[｜\|]*)?tool_calls?[^>]*>\s*(?:<invoke\b.*?</invoke>\s*)+</[｜\|]*\s*(?:DSML\s*[｜\|]*)?tool_calls?>", "", clean_text, flags=re.DOTALL)
     clean_text = re.sub(invoke_pat, "", clean_text, flags=re.DOTALL)
 
-    # 2. Паттерны для поиска стандартных блоков JSON tool_call
+    # 2. 匹配标准 JSON tool_call 块
     patterns = [
         r"<[｜\|]*\s*(?:DSML\s*[｜\|]*)?tool_calls?[^>]*>\s*(.*?)\s*</[｜\|]*\s*(?:DSML\s*[｜\|]*)?tool_calls?[^>]*>",
         r"```(?:tool_call|tool_calls|function_call)\s*(.*?)\s*```",
@@ -511,7 +505,7 @@ def extract_tool_calls(text: str) -> Tuple[str, List[OpenAIToolCall]]:
                     )
             clean_text = re.sub(pat, "", clean_text, flags=re.DOTALL)
 
-    # 3. Проверка нативного формата Qwen: <function=name>args</function>
+    # 3. 匹配 Qwen 原生格式: <function=name>args</function>
     func_pat = r"<function=([a-zA-Z0-9_\-\.]+)[^>]*>\s*(.*?)\s*</function>"
     for match in re.finditer(func_pat, text, re.DOTALL):
         name = match.group(1).strip()
@@ -543,7 +537,7 @@ def extract_tool_calls(text: str) -> Tuple[str, List[OpenAIToolCall]]:
             )
     clean_text = re.sub(func_pat, "", clean_text, flags=re.DOTALL)
 
-    # 4. Проверка "голого" JSON вызова инструмента без обрамляющих тегов (Naked JSON tool call)
+    # 4. 匹配无标签裸露的 JSON 工具调用 (Naked JSON tool call)
     naked_pat = re.compile(
         r'\{\s*"(?:name|function)"\s*:\s*"([a-zA-Z0-9_\-\.]+)"\s*,\s*"(?:arguments|parameters|input)"\s*:\s*(\{)',
         re.DOTALL
@@ -591,7 +585,7 @@ def extract_tool_calls(text: str) -> Tuple[str, List[OpenAIToolCall]]:
             )
         clean_text = clean_text.replace(block, "")
 
-    # Реверсивный порядок: {"arguments": ..., "name": "..."}
+    # 反序结构兼容: {"arguments": ..., "name": "..."}
     naked_rev_pat = re.compile(
         r'\{\s*"(?:arguments|parameters|input)"\s*:\s*(\{.*?\}).*?,\s*"(?:name|function)"\s*:\s*"([a-zA-Z0-9_\-\.]+)"\s*\}',
         re.DOTALL
@@ -617,8 +611,7 @@ def extract_tool_calls(text: str) -> Tuple[str, List[OpenAIToolCall]]:
             )
         clean_text = clean_text.replace(block, "")
 
-    # 5. Проверка неформатированного вызова Edit/Write файла без JSON:
-    # <tool_call>\npath/to/file.py\ncode...\n</tool_call>
+    # 5. 容错提取非标准裸文件编辑指令
     raw_file_call_pat = re.compile(
         r'<[｜\|]*\s*(?:DSML\s*[｜\|]*)?tool_calls?[^>]*>\s*([a-zA-Z]:[\\/][^ \r\n\t]+|[a-zA-Z0-9_\-\.\/]+\.[a-zA-Z0-9]+)\s+([\s\S]+?)(?:</[｜\|]*\s*(?:DSML\s*[｜\|]*)?tool_calls?>|$)',
         re.DOTALL
@@ -627,7 +620,6 @@ def extract_tool_calls(text: str) -> Tuple[str, List[OpenAIToolCall]]:
         fpath = match.group(1).strip()
         code_body = match.group(2).strip()
 
-        # Пропускаем, если внутри уже есть валидный JSON
         if '"name"' in code_body or '"arguments"' in code_body:
             continue
 
@@ -665,7 +657,7 @@ def extract_tool_calls(text: str) -> Tuple[str, List[OpenAIToolCall]]:
             )
         clean_text = clean_text.replace(match.group(0), "")
 
-    # Окончательная подчистка оставшихся пустых тегов <tool_call>
+    # 清理残留空标签
     clean_text = re.sub(r'</?[｜\|]*\s*(?:DSML\s*[｜\|]*)?tool_calls?[^>]*>', '', clean_text)
 
     return clean_text.strip(), tool_calls

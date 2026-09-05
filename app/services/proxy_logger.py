@@ -13,7 +13,7 @@ console = Console()
 
 
 class ProxyEventLogger:
-    """Центральный регистратор и визуализатор запросов агентов в режиме Proxy."""
+    """代理模式下 AI Agent 请求的中央事件记录器与终端可视化器。"""
 
     def __init__(self):
         self.active_subscribers: List[Callable[[Dict[str, Any]], None]] = []
@@ -95,7 +95,7 @@ class ProxyEventLogger:
             try:
                 sub(event)
             except Exception as e:
-                logger.debug(f"Ошибка в proxy subscriber: {e}")
+                logger.debug(f"Proxy 订阅回调异常: {e}")
 
 
 proxy_logger = ProxyEventLogger()

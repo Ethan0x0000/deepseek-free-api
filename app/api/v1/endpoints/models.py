@@ -1,73 +1,47 @@
-from typing import Annotated, Dict, Any, List
-from pydantic import BaseModel
-from fastapi import APIRouter, Depends, HTTPException
-from app.api.deps import get_http_client
+import time
+from typing import Any, Dict, List
+from fastapi import APIRouter
 from app.providers.registry import provider_registry
 from app.schemas.chat import ModelInfo
-import httpx
 
-router = APIRouter(tags=["Models & Providers"])
-
-
-class ProviderSwitchRequest(BaseModel):
-    provider: str
+router = APIRouter(tags=["Models"])
 
 
-@router.get("/api/v1/models", response_model=List[ModelInfo], summary="Список доступных моделей всех провайдеров")
-async def list_models(
-    client: Annotated[httpx.AsyncClient, Depends(get_http_client)]
-) -> List[ModelInfo]:
+@router.get("/api/v1/models", response_model=List[ModelInfo], summary="获取所有提供商的可用模型列表")
+async def list_models() -> List[ModelInfo]:
     return provider_registry.get_all_models()
 
 
-@router.get("/v1/models", summary="OpenAI-совместимый список моделей всех провайдеров")
-async def openai_list_models(
-    client: Annotated[httpx.AsyncClient, Depends(get_http_client)]
-) -> Dict[str, Any]:
-    models = provider_registry.get_all_models()
+@router.get("/v1/models", summary="OpenAI 兼容的模型列表接口")
+async def openai_list_models() -> Dict[str, Any]:
+    all_models = provider_registry.get_all_models()
     return {
         "object": "list",
         "data": [
             {
                 "id": m.id,
                 "object": "model",
-                "created": 1700000000,
-                "owned_by": m.id.split("-")[0] if "-" in m.id else "llm",
-                "name": m.name,
-                "description": m.description,
-                "supports_thinking": m.supports_thinking,
-                "supports_search": m.supports_search,
-                "model_type": m.model_type,
+                "created": int(time.time()),
+                "owned_by": "deepseek-free-api",
                 "permission": [],
                 "root": m.id,
                 "parent": None,
             }
-            for m in models
-        ],
+            for m in all_models
+        ]
     }
 
 
-@router.get("/api/v1/providers", summary="Список доступных LLM-провайдеров и их статус")
-async def list_providers(
-    client: Annotated[httpx.AsyncClient, Depends(get_http_client)]
-) -> Dict[str, Any]:
+@router.get("/api/v1/providers", summary="获取所有 LLM 提供商列表及其认证状态")
+async def list_providers() -> List[Dict[str, Any]]:
+    return provider_registry.list_providers()
+
+
+@router.post("/api/v1/providers/switch", summary="切换默认活跃提供商")
+async def switch_default_provider(provider_id: str) -> Dict[str, Any]:
+    provider_registry.set_default_provider(provider_id)
     return {
+        "status": "success",
         "default_provider": provider_registry.default_provider_id,
-        "providers": provider_registry.list_providers(),
+        "message": f"默认提供商已成功切换为 {provider_registry.default_provider_id}",
     }
-
-
-@router.post("/api/v1/providers/switch", summary="Переключить активного провайдера по умолчанию")
-async def switch_provider(
-    request: ProviderSwitchRequest,
-    client: Annotated[httpx.AsyncClient, Depends(get_http_client)],
-) -> Dict[str, Any]:
-    try:
-        provider_registry.set_default_provider(request.provider)
-        return {
-            "status": "success",
-            "default_provider": provider_registry.default_provider_id,
-            "message": f"Провайдер успешно изменен на {provider_registry.default_provider_id}",
-        }
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))

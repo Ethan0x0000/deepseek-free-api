@@ -5,8 +5,8 @@ import re
 import time
 from typing import AsyncGenerator, List, Optional
 import uuid
-import httpx
 from fastapi import HTTPException, status
+import httpx
 
 from app.core.credentials import credentials_manager
 from app.providers.base import BaseLLMProvider
@@ -23,7 +23,7 @@ QWEN_MODELS = [
     ModelInfo(
         id="qwen3.7-plus",
         name="Qwen 3.7 Plus",
-        description="Актуальная веб-модель Qwen 3.7 Plus с режимом глубоких рассуждений (Thinking).",
+        description="通义千问 3.7 Plus 旗舰 Web 模型，支持深度思考 (Thinking)。",
         model_type="expert",
         supports_thinking=True,
         supports_search=True,
@@ -31,7 +31,7 @@ QWEN_MODELS = [
     ModelInfo(
         id="qwen-3.8",
         name="Qwen 3.8",
-        description="Флагманская модель Qwen 3-го поколения с глубоким пониманием и рассуждениями.",
+        description="第 3 代通义千问旗舰通用大模型，具备深层推理理解能力。",
         model_type="expert",
         supports_thinking=True,
         supports_search=True,
@@ -39,7 +39,7 @@ QWEN_MODELS = [
     ModelInfo(
         id="qwen-3.8-coder",
         name="Qwen 3.8 Coder",
-        description="Передовая специализированная модель для сложного программирования, рефакторинга и агентных пайплайнов.",
+        description="先进的代码专项大模型，专为复杂软件工程、重构与 Agent 流水线优化。",
         model_type="expert",
         supports_thinking=True,
         supports_search=False,
@@ -47,7 +47,7 @@ QWEN_MODELS = [
     ModelInfo(
         id="qwen-3-max",
         name="Qwen 3 Max",
-        description="Максимальная по интеллектуальной мощности модель линейки Qwen 3.",
+        description="通义千问 3 系列计算能力最强的全功能大模型。",
         model_type="expert",
         supports_thinking=True,
         supports_search=True,
@@ -55,7 +55,7 @@ QWEN_MODELS = [
     ModelInfo(
         id="qwen-3-plus",
         name="Qwen 3 Plus",
-        description="Сбалансированная и быстрая модель Qwen 3 общего назначения.",
+        description="均衡高效的高性价比通用大模型。",
         model_type="default",
         supports_thinking=False,
         supports_search=True,
@@ -63,7 +63,7 @@ QWEN_MODELS = [
     ModelInfo(
         id="qwen-3-flash",
         name="Qwen 3 Flash",
-        description="Сверхбыстрая легковесная модель для мгновенных ответов.",
+        description="极速轻量化模型，实现毫秒级首字响应。",
         model_type="default",
         supports_thinking=False,
         supports_search=True,
@@ -71,7 +71,7 @@ QWEN_MODELS = [
     ModelInfo(
         id="qwen-2.5-coder-32b",
         name="Qwen 2.5 Coder 32B",
-        description="Классическая кодовая модель Qwen 2.5 Coder.",
+        description="经典的开源 32B 编程专用大模型。",
         model_type="expert",
         supports_thinking=False,
         supports_search=False,
@@ -81,8 +81,8 @@ QWEN_MODELS = [
 
 class QwenProvider(BaseLLMProvider):
     """
-    Провайдер для прямого веб-API chat.qwen.ai (/api/v2/chat/completions).
-    На 100% воспроизводит протокол v2.1, заголовки браузера, куки и автосоздание чат-сессий (/api/v2/chats/new).
+    通义千问网页直连 API 提供商 (chat.qwen.ai/api/v2/chat/completions)。
+    完整实现 v2.1 通信协议、浏览器请求头伪装与会话管理。
     """
 
     def __init__(self, http_client: httpx.AsyncClient):
@@ -111,7 +111,7 @@ class QwenProvider(BaseLLMProvider):
         session_manager.clear_provider_session("qwen")
 
     async def list_sessions(self) -> List[dict]:
-        """Возвращает список существующих чатов с сервера Qwen."""
+        """获取 Qwen 服务端历史会话列表。"""
         token = credentials_manager.get_token("qwen")
         if not token:
             return []
@@ -128,14 +128,14 @@ class QwenProvider(BaseLLMProvider):
                         if isinstance(it, dict):
                             results.append({
                                 "id": it.get("id"),
-                                "title": it.get("title") or "Без названия",
+                                "title": it.get("title") or "未命名",
                                 "created_at": it.get("created_at"),
                                 "updated_at": it.get("updated_at"),
                                 "provider": "qwen"
                             })
                 return results
         except Exception as e:
-            logger.warning(f"Ошибка получения списка сессий Qwen: {e}")
+            logger.warning(f"获取 Qwen 会话列表失败: {e}")
         return []
 
     def _resolve_qwen_model(self, requested_model: str) -> str:
@@ -157,10 +157,9 @@ class QwenProvider(BaseLLMProvider):
         return requested_model
 
     def _build_headers(self, token_or_cookie: str, chat_id: str = "", thinking_enabled: bool = True) -> dict:
-        """Формирует заголовки браузера для chat.qwen.ai."""
+        """构建 chat.qwen.ai 所需的浏览器伪装头。"""
         now_str = datetime.datetime.now(datetime.timezone.utc).strftime("%a %b %d %Y %H:%M:%S GMT+0000")
         req_id = str(uuid.uuid4())
-
         think_mode = "Thinking" if thinking_enabled else "Normal"
 
         if "token=" in token_or_cookie or "; " in token_or_cookie or "_bl_uid=" in token_or_cookie:
@@ -168,55 +167,59 @@ class QwenProvider(BaseLLMProvider):
             if "qwen-thinking_mode=" in cookie_header:
                 cookie_header = re.sub(r'qwen-thinking_mode=[^;]+', f'qwen-thinking_mode={think_mode}', cookie_header)
             else:
-                cookie_header = f"{cookie_header.rstrip(';')}; qwen-thinking_mode={think_mode};"
-            jwt_token = ""
-            for part in token_or_cookie.split(";"):
-                part = part.strip()
-                if part.startswith("token="):
-                    jwt_token = part[6:].strip()
-        else:
-            jwt_token = token_or_cookie.strip()
-            cookie_header = f"token={jwt_token}; qwen-thinking_mode={think_mode}; qwen-locale=zh-CN; qwen-theme=dark;"
+                cookie_header += f"; qwen-thinking_mode={think_mode}"
 
-        referer = f"https://chat.qwen.ai/c/{chat_id}" if chat_id else "https://chat.qwen.ai/"
+            auth_token = ""
+            m = re.search(r'(?:^|;\s*)token=([^;]+)', cookie_header)
+            if m:
+                auth_token = m.group(1).strip()
+            elif not cookie_header.startswith("token="):
+                first_val = cookie_header.split(";")[0].strip()
+                if "=" not in first_val:
+                    auth_token = first_val
+        else:
+            auth_token = token_or_cookie.strip()
+            cookie_header = (
+                f"token={auth_token}; "
+                f"qwen-thinking_mode={think_mode}; "
+                f"tongyi_sso_ticket={auth_token}; "
+                f"login_tongyi_ticket={auth_token}; "
+                f"channel=default; "
+                f"timezone=Asia/Shanghai"
+            )
 
         headers = {
-            "Accept": "application/json, text/event-stream",
-            "Accept-Encoding": "gzip, deflate",
+            "Accept": "text/event-stream",
+            "Accept-Encoding": "gzip, deflate, br, zstd",
             "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Authorization": f"Bearer {auth_token}" if auth_token and not auth_token.startswith("Bearer ") else auth_token,
             "Connection": "keep-alive",
             "Content-Type": "application/json",
             "Cookie": cookie_header,
-            "Host": "chat.qwen.ai",
             "Origin": "https://chat.qwen.ai",
-            "Referer": referer,
+            "Priority": "u=1, i",
+            "Referer": f"https://chat.qwen.ai/c/{chat_id}" if chat_id else "https://chat.qwen.ai/",
+            "Sec-Ch-Ua": '"Chromium";v="133", "Google Chrome";v="133", "Not?A_Brand";v="99"',
+            "Sec-Ch-Ua-Mobile": "?0",
+            "Sec-Ch-Ua-Platform": '"Windows"',
             "Sec-Fetch-Dest": "empty",
             "Sec-Fetch-Mode": "cors",
             "Sec-Fetch-Site": "same-origin",
-            "Timezone": now_str,
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
-            "Version": "0.2.89",
-            "X-Accel-Buffering": "no",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
+            "X-Client-Date": now_str,
+            "X-Platform": "pc_web",
             "X-Request-Id": req_id,
-            "bx-v": "2.5.37",
-            "sec-ch-ua": '"Not=A?Brand";v="99", "Google Chrome";v="151", "Chromium";v="151"',
-            "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": '"Windows"',
-            "source": "web",
         }
-
-        if jwt_token:
-            headers["Authorization"] = f"Bearer {jwt_token}"
 
         return headers
 
     async def _create_new_chat(self) -> str:
-        """Создает новую сессию через POST /api/v2/chats/new."""
+        """通过 POST /api/v2/chats/new 创建新会话。"""
         token = credentials_manager.get_token("qwen")
         if not token:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Учетные данные Qwen не настроены. Укажите токен или Cookie через команду /token qwen <токен_или_куки>."
+                detail="Qwen 凭证未配置。请通过命令 /token qwen <token> 设置凭证。"
             )
 
         headers = self._build_headers(token, "")
@@ -230,12 +233,12 @@ class QwenProvider(BaseLLMProvider):
                     new_id = data["data"].get("id")
                     if new_id:
                         self._current_chat_id = new_id
-                        logger.info(f"Создан новый чат Qwen: {new_id}")
+                        logger.info(f"创建 Qwen 新会话: {new_id}")
                         return new_id
         except Exception as e:
-            logger.warning(f"Ошибка при создании чата Qwen через /chats/new: {e}")
+            logger.warning(f"通过 /chats/new 创建 Qwen 会话失败: {e}")
 
-        # Резервный fallback: получаем список существующих чатов
+        # 回退: 获取现有会话列表
         try:
             resp = await self.client.get(f"{self.base_url}/api/v2/chats", headers=headers, timeout=20.0)
             if resp.status_code == 200:
@@ -254,31 +257,21 @@ class QwenProvider(BaseLLMProvider):
         return generated_id
 
     async def get_or_create_chat(self, chat_id: Optional[str] = None) -> str:
-        """
-        Получает существующий chat_id, либо использует единый постоянный чат (в режиме single_session_mode),
-        либо создает новую сессию через POST /api/v2/chats/new.
-        
-        В single_session_mode сессия хранится в session_manager per-provider, 
-        поэтому при смене провайдеров сессия Qwen восстанавливается.
-        """
+        """获取现有 chat_id 或创建新会话。"""
         from app.services.session_manager import session_manager
 
         if chat_id:
             self._current_chat_id = chat_id
-            # Сохраняем в per-provider хранилище
             if session_manager.single_session_mode:
                 session_manager.set_provider_session("qwen", chat_id)
             return chat_id
 
         if session_manager.single_session_mode:
-            # В single-режиме: берём локальный _current_chat_id (если есть),
-            # иначе пробуем восстановить из session_manager (сессия другой вкладки/перезапуска)
             existing = self._current_chat_id or session_manager.get_provider_session("qwen")
             if existing:
                 self._current_chat_id = existing
-                # Синхронизируем в session_manager чтобы следующие провайдеры тоже видели
                 session_manager.set_provider_session("qwen", existing)
-                logger.debug(f"Переиспользование текущего чата Qwen (Single-Session): {existing}")
+                logger.debug(f"复用当前 Qwen 单会话 (Single-Session): {existing}")
                 return existing
 
         new_id = await self._create_new_chat()
@@ -287,7 +280,7 @@ class QwenProvider(BaseLLMProvider):
         return new_id
 
     def _build_payload(self, prompt: str, model: str, chat_id: str, thinking_enabled: bool, search_enabled: bool) -> dict:
-        """Формирует точный JSON payload протокола v2.1 chat.qwen.ai."""
+        """构建 chat.qwen.ai v2.1 协议的 JSON 请求体。"""
         now_ts = int(time.time())
         fid = str(uuid.uuid4())
         child_id = str(uuid.uuid4())
@@ -346,7 +339,7 @@ class QwenProvider(BaseLLMProvider):
         if not token:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Учетные данные Qwen не настроены. Укажите токен или Cookie через команду /token qwen <токен_или_куки>."
+                detail="Qwen 凭证未配置。请通过命令 /token qwen <token> 设置凭证。"
             )
 
         from app.services.context_compressor import context_compressor, estimate_tokens
@@ -357,16 +350,14 @@ class QwenProvider(BaseLLMProvider):
 
         chat_id = await self.get_or_create_chat(request.chat_session_id)
         resolved_model = self._resolve_qwen_model(request.model)
-        # Default to False (fast mode) when not explicitly set - user controls this via toggle
         thinking_enabled = request.thinking_enabled if request.thinking_enabled is not None else False
         search_enabled = request.search_enabled if request.search_enabled is not None else False
 
         headers = self._build_headers(token, chat_id, thinking_enabled)
         payload = self._build_payload(request.prompt, resolved_model, chat_id, thinking_enabled, search_enabled)
 
-        logger.info(f"Отправка запроса в Qwen API (chat_id: {chat_id}, модель: {resolved_model}, промпт: ~{estimate_tokens(request.prompt):,} токенов)")
+        logger.info(f"发送请求至 Qwen API (chat_id: {chat_id}, 模型: {resolved_model}, 提示词: ~{estimate_tokens(request.prompt):,} Token)")
 
-        # Отправляем начальный чанк с session_id
         yield StreamChunk(type="session", text=chat_id, session_id=chat_id)
 
         url = f"{self.base_url}/api/v2/chat/completions?chat_id={chat_id}"
@@ -378,10 +369,10 @@ class QwenProvider(BaseLLMProvider):
             if resp.status_code != 200:
                 body = await resp.aread()
                 err_text = body.decode("utf-8", errors="replace")
-                logger.error(f"Qwen HTTP {resp.status_code} error: {err_text}")
+                logger.error(f"Qwen HTTP {resp.status_code} 错误: {err_text}")
                 raise HTTPException(
                     status_code=resp.status_code,
-                    detail=f"Qwen API error ({resp.status_code}): {err_text}"
+                    detail=f"Qwen API 错误 ({resp.status_code}): {err_text}"
                 )
 
             last_thought_len = 0
@@ -393,21 +384,21 @@ class QwenProvider(BaseLLMProvider):
                 if not line:
                     continue
 
-                # 1. Проверка на ошибки Alibaba WAF / Капчу (ответ не в формате SSE)
+                # 1. 阿里云 WAF / 验证码检测
                 if line.startswith("{"):
                     try:
                         err_json = json.loads(line)
                         ret_list = err_json.get("ret", [])
                         ret_str = str(ret_list)
                         if "FAIL_SYS_USER_VALIDATE" in ret_str or "RGV587_ERROR" in ret_str or "punish" in str(err_json):
-                            logger.error(f"❌ Alibaba Cloud WAF заблокировал запрос (капча / rate limit): {err_json}")
+                            logger.error(f"❌ 阿里云 WAF 拦截请求 (验证码 / 限流): {err_json}")
                             raise HTTPException(
                                 status_code=status.HTTP_403_FORBIDDEN,
-                                detail="Alibaba WAF (Капча/Блокировка): Сессия Qwen требует подтверждения в браузере. Выполните команду /login qwen в терминале."
+                                detail="阿里云 WAF 触发人机验证。请在终端执行 /login qwen 命令完成验证。"
                             )
                         if "error" in err_json or "code" in err_json:
                             err_msg = err_json.get("message") or err_json.get("error") or err_json.get("code")
-                            logger.error(f"❌ Qwen API ошибка в ответе: {err_json}")
+                            logger.error(f"❌ Qwen API 返回错误: {err_json}")
                             raise HTTPException(
                                 status_code=status.HTTP_400_BAD_REQUEST,
                                 detail=f"Qwen API error: {err_msg}"
@@ -420,17 +411,16 @@ class QwenProvider(BaseLLMProvider):
 
                 data_str = line[5:].strip()
                 if data_str == "[DONE]":
-                    logger.debug("Qwen stream [DONE] получен.")
+                    logger.debug("Qwen stream [DONE] 接收完成。")
                     yield StreamChunk(type="status", text="FINISHED", session_id=chat_id, token_usage=token_usage)
                     break
 
                 try:
                     data = json.loads(data_str)
 
-                    # Проверка ошибок внутри SSE
                     if "error" in data or ("code" in data and data["code"] not in [200, "200", 0, "0"]):
                         err_msg = data.get("message") or data.get("error") or data.get("code")
-                        logger.error(f"❌ Ошибка в SSE потоке Qwen: {data}")
+                        logger.error(f"❌ Qwen SSE 流异常: {data}")
                         self.reset_session()
                         raise HTTPException(
                             status_code=status.HTTP_400_BAD_REQUEST,
@@ -444,7 +434,7 @@ class QwenProvider(BaseLLMProvider):
                     if choices:
                         delta = choices[0].get("delta", {})
 
-                        # 1. Мысли Qwen
+                        # 1. 思考链 (Thinking)
                         extra = delta.get("extra", {})
                         if "summary_thought" in extra and isinstance(extra["summary_thought"], dict):
                             st_content = extra["summary_thought"].get("content", [])
@@ -466,7 +456,7 @@ class QwenProvider(BaseLLMProvider):
                             received_chunks_count += 1
                             yield StreamChunk(type="thinking", text=delta["thought"], session_id=chat_id)
 
-                        # 2. Ответ
+                        # 2. 正文 (Content)
                         content = delta.get("content")
                         if content:
                             received_chunks_count += 1
@@ -490,18 +480,18 @@ class QwenProvider(BaseLLMProvider):
                 except HTTPException:
                     raise
                 except Exception as e:
-                    logger.debug(f"Исключение при парсинге чанка Qwen: {e}")
+                    logger.debug(f"解析 Qwen 分块异常: {e}")
 
             if received_chunks_count == 0:
-                logger.warning(f"⚠️ Qwen API вернул 0 токенов (chat_id: {chat_id}). Возможно сессия устарела или сработала защита.")
+                logger.warning(f"⚠️ Qwen API 返回了 0 个 Token (chat_id: {chat_id})。可能触发了会话过期或防护。")
 
         except HTTPException:
             raise
         except Exception as e:
-            logger.error(f"Ошибка при вызове Qwen: {e}")
+            logger.error(f"调用 Qwen 失败: {e}")
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Ошибка соединения с Qwen API: {str(e)}"
+                detail=f"连接 Qwen API 失败: {str(e)}"
             )
 
     async def send_message(
@@ -525,7 +515,7 @@ class QwenProvider(BaseLLMProvider):
 
         return DeepSeekChatResponse(
             session_id=session_id,
-            message_id=1,
+            message_id=0,
             thinking="".join(full_thinking) if full_thinking else None,
             content="".join(full_content),
             token_usage=token_usage,

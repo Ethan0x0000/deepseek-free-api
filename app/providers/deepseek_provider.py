@@ -12,7 +12,7 @@ from app.services.deepseek_client import AVAILABLE_MODELS, DeepSeekClient
 
 
 class DeepSeekProvider(BaseLLMProvider):
-    """Провайдер для DeepSeek Web API (chat.deepseek.com)."""
+    """DeepSeek Web API (chat.deepseek.com) 提供商。"""
 
     def __init__(self, http_client: httpx.AsyncClient):
         super().__init__(provider_id="deepseek", display_name="DeepSeek", http_client=http_client)

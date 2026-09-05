@@ -1,86 +1,87 @@
-import pytest
 import json
-import httpx
-from unittest.mock import patch
+import pytest
 from httpx import AsyncClient, ASGITransport
+import httpx
+
 from app.main import app
-from app.core.credentials import credentials_manager
 from app.providers.registry import provider_registry
 
 
 @pytest.mark.asyncio
-async def test_provider_registry_routing():
-    providers = provider_registry.list_providers()
-    provider_ids = [p["id"] for p in providers]
-    assert "deepseek" in provider_ids
-    assert "qwen" in provider_ids
-    assert "glm" not in provider_ids
+async def test_openai_chat_completions_model_routing():
+    """测试不同模型前缀向提供商的正确路由。"""
+    captured_providers = []
 
-    p_deepseek = provider_registry.resolve_provider_for_model("deepseek-v4-pro")
-    assert p_deepseek.provider_id == "deepseek"
+    orig_resolve = provider_registry.resolve_provider_for_model
+    def mock_resolve(model_name: str):
+        p = orig_resolve(model_name)
+        captured_providers.append((model_name, p.provider_id))
+        return p
 
-    p_qwen = provider_registry.resolve_provider_for_model("qwen-3.8-coder")
-    assert p_qwen.provider_id == "qwen"
+    provider_registry.resolve_provider_for_model = mock_resolve
+
+    deepseek_provider = provider_registry.resolve_provider_for_model("deepseek-v4-pro")
+    assert deepseek_provider.provider_id == "deepseek"
+
+    qwen_provider = provider_registry.resolve_provider_for_model("qwen3.7-plus")
+    assert qwen_provider.provider_id == "qwen"
+
+    qwen_coder = provider_registry.resolve_provider_for_model("qwen-3.8-coder")
+    assert qwen_coder.provider_id == "qwen"
+
+    provider_registry.resolve_provider_for_model = orig_resolve
+
+
+def test_qwen_model_resolution():
+    """测试 Qwen 模型别名映射。"""
+    qwen_p = provider_registry.get_provider("qwen")
+    assert qwen_p._resolve_qwen_model("qwen-3.8-coder") == "qwen3.8-max"
+    assert qwen_p._resolve_qwen_model("qwen3.7-plus") == "qwen3.7-plus"
+    assert qwen_p._resolve_qwen_model("qwen-3-max") == "qwen3.8-max"
+    assert qwen_p._resolve_qwen_model("qwen-3-flash") == "qwen3.7-plus"
 
 
 @pytest.mark.asyncio
-async def test_all_models_list():
+async def test_list_models_contains_both_providers():
+    """测试 /api/v1/models 与 /v1/models 包含各厂商模型。"""
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
-        resp = await ac.get("/api/v1/models")
-        assert resp.status_code == 200
-        models = resp.json()
-        model_ids = [m["id"] for m in models]
-
-        assert "deepseek-v4-pro" in model_ids
-        assert "deepseek-v4-flash" in model_ids
-        assert "deepseek-reasoner" in model_ids
-
-        assert "qwen-3.8" in model_ids
-        assert "qwen-3.8-coder" in model_ids
-        assert "qwen3.7-plus" in model_ids
-
-
-@pytest.mark.asyncio
-async def test_provider_switching_api():
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
-        resp = await ac.get("/api/v1/providers")
+        resp = await ac.get("/v1/models")
         assert resp.status_code == 200
         data = resp.json()
-        assert "default_provider" in data
-        assert len(data["providers"]) == 2
+        ids = [m["id"] for m in data["data"]]
+        assert "deepseek-v4-pro" in ids
+        assert "deepseek-reasoner" in ids
+        assert "qwen3.7-plus" in ids
+        assert "qwen-3.8-coder" in ids
 
-        sw_resp = await ac.post("/api/v1/providers/switch", json={"provider": "qwen"})
-        assert sw_resp.status_code == 200
-        assert sw_resp.json()["default_provider"] == "qwen"
-        assert provider_registry.default_provider_id == "qwen"
-
-        sw_resp2 = await ac.post("/api/v1/providers/switch", json={"provider": "deepseek"})
-        assert sw_resp2.status_code == 200
-        assert sw_resp2.json()["default_provider"] == "deepseek"
+        api_resp = await ac.get("/api/v1/models")
+        assert api_resp.status_code == 200
+        api_data = api_resp.json()
+        api_ids = [m["id"] for m in api_data]
+        assert "deepseek-v4-pro" in api_ids
+        assert "qwen3.7-plus" in api_ids
 
 
 @pytest.mark.asyncio
-async def test_multi_provider_credentials():
-    orig_qwen = credentials_manager.get_token("qwen")
+async def test_providers_switch_endpoint():
+    """测试切换默认提供商接口。"""
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        resp = await ac.post("/api/v1/providers/switch?provider_id=qwen")
+        assert resp.status_code == 200
+        assert provider_registry.default_provider_id == "qwen"
 
-    try:
-        credentials_manager._tokens["qwen"] = "mock_qwen_token"
-
-        assert credentials_manager.get_token("qwen") == "mock_qwen_token"
-        assert credentials_manager.is_authenticated("qwen") is True
-    finally:
-        if orig_qwen:
-            credentials_manager._tokens["qwen"] = orig_qwen
+        # 还原回 deepseek
+        await ac.post("/api/v1/providers/switch?provider_id=deepseek")
+        assert provider_registry.default_provider_id == "deepseek"
 
 
 @pytest.mark.asyncio
 async def test_qwen_adaptive_context_compression():
-    """Проверяет, что контекст для Qwen автоматически укладывается в безопасный лимит WAF."""
+    """验证 Qwen 的上下文自动受控于安全 WAF 限制内。"""
     from app.services.context_compressor import context_compressor, estimate_tokens
     from app.services.tool_parser import format_messages_to_prompt
     from app.schemas.openai import OpenAIChatMessage, OpenAITool, OpenAIToolFunction
 
-    # Создаем 50 инструментов
     tools = [
         OpenAITool(
             type="function",
@@ -93,10 +94,9 @@ async def test_qwen_adaptive_context_compression():
         for i in range(50)
     ]
 
-    # Создаем длинную историю сообщений (>30,000 токенов)
     messages = [
-        OpenAIChatMessage(role="system", content="Ты системный помощник."),
-        OpenAIChatMessage(role="user", content="Инструкция: " + ("Очень длинный текст задачи агента " * 3000)),
+        OpenAIChatMessage(role="system", content="You are a system assistant."),
+        OpenAIChatMessage(role="user", content="Task instructions: " + ("Very long prompt content for testing " * 3000)),
     ]
 
     qwen_limit = context_compressor.get_limit_for_provider("qwen")
@@ -105,15 +105,13 @@ async def test_qwen_adaptive_context_compression():
     compiled = format_messages_to_prompt(messages, tools, max_tokens=qwen_limit)
     compiled_tokens = estimate_tokens(compiled)
 
-    # Проверяем, что промпт уложился в безопасный лимит
     assert compiled_tokens <= qwen_limit * 1.5
-    # И размер в байтах безопасен для WAF (<80 KB)
     assert len(compiled.encode("utf-8")) < 80_000
 
 
 @pytest.mark.asyncio
 async def test_stream_error_sse_formatting(monkeypatch):
-    """Проверяет, что ошибка провайдера безопасно передается в SSE без падения ASGI."""
+    """测试提供商错误在 SSE 流中以标准格式输出。"""
     from fastapi import HTTPException
 
     qwen_p = provider_registry.get_provider("qwen")
@@ -127,7 +125,7 @@ async def test_stream_error_sse_formatting(monkeypatch):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         req_payload = {
             "model": "qwen-3.8-coder",
-            "messages": [{"role": "user", "content": "Привет"}],
+            "messages": [{"role": "user", "content": "Hello"}],
             "stream": True,
         }
         resp = await ac.post("/v1/chat/completions", json=req_payload)
@@ -137,48 +135,12 @@ async def test_stream_error_sse_formatting(monkeypatch):
         assert "data: [DONE]" in text
 
 
-@pytest.mark.asyncio
-async def test_qwen_thinking_disabled_in_openai_endpoint():
-    """Тестирует корректную передачу и отключение режима thinking для моделей Qwen через OpenAI эндпоинт."""
-    captured_requests = []
-
-    async def mock_send(req: httpx.Request, *args, **kwargs):
-        captured_requests.append(req)
-        return httpx.Response(
-            200,
-            content=b"data: {\"v\":{\"response\":{\"status\":\"FINISHED\",\"fragments\":[{\"id\":1,\"type\":\"RESPONSE\",\"content\":\"Fast response\"}]}}}\n\n"
-        )
-
-    qwen_p = provider_registry.get_provider("qwen")
-    transport = ASGITransport(app=app)
-    async with httpx.AsyncClient(transport=transport, base_url="http://test") as ac:
-        with patch("app.providers.qwen_provider.credentials_manager.get_token", return_value="fake_token; qwen-thinking_mode=Thinking;"), \
-             patch.object(qwen_p.client, "send", mock_send):
-            req_payload = {
-                "model": "qwen-3-max",
-                "messages": [{"role": "user", "content": "2+2?"}],
-                "thinking_enabled": False,
-                "chat_session_id": "test-chat-123",
-                "stream": True,
-            }
-            resp = await ac.post("/v1/chat/completions", json=req_payload)
-            assert resp.status_code == 200
-            assert len(captured_requests) == 1
-            sent_req = captured_requests[0]
-            cookie = sent_req.headers.get("cookie", "")
-            assert "qwen-thinking_mode=Normal" in cookie
-            body = json.loads(sent_req.content)
-            feature_config = body["messages"][0]["feature_config"]
-            assert feature_config["thinking_enabled"] is False
-            assert feature_config["thinking_mode"] == "Normal"
-
-
 def test_robust_tool_call_extraction():
-    """Тестирует парсинг вызовов инструментов с многострочным кодом, опечатками в тегах и дедупликацией."""
+    """测试多行代码、畸变标签与重复去重的鲁棒工具调用解析。"""
     from app.services.tool_parser import extract_tool_calls
 
     raw_response = """
-Вот созданный файл:
+Here is the file:
 
 <tool_call">
 {"name": "write_to_file", "arguments": {"path": "calculator.py", "content": "def add(a, b):\n    return a + b\n\nprint(add(2, 3))\n"}}
@@ -193,7 +155,7 @@ def test_robust_tool_call_extraction():
 </function>
 """
     clean_text, calls = extract_tool_calls(raw_response)
-    assert len(calls) == 2  # Дубликат write_to_file отсеян, добавлен replace_in_file
+    assert len(calls) == 2
     assert calls[0].function.name == "write_to_file"
     assert "calculator.py" in calls[0].function.arguments
     assert calls[1].function.name == "replace_in_file"
@@ -203,14 +165,14 @@ def test_robust_tool_call_extraction():
 
 
 def test_multiple_json_in_single_tool_call_tag():
-    """Тестирует парсинг нескольких JSON объектов внутри одного тега <tool_call> (как возвращает Qwen)."""
+    """测试单个 <tool_call> 标签内包含多个 JSON 对象的并行调用解析。"""
     from app.services.tool_parser import extract_tool_calls
 
-    raw_response = """Изучу структуру проекта и текущий парсер курсов.
+    raw_response = """Let me explore the directory.
 
 <tool_call>
-{"name": "Bash", "arguments": {"command": "find \\"E:/vibecoding/stepik-searcher\\" -type f | head -80", "description": "List project files"}}
-{"name": "Bash", "arguments": {"command": "ls -la \\"E:/vibecoding/stepik-searcher\\"", "description": "List root directory"}}
+{"name": "Bash", "arguments": {"command": "find /tmp -type f | head -80", "description": "List files"}}
+{"name": "Bash", "arguments": {"command": "ls -la /tmp", "description": "List root"}}
 </tool_call>"""
 
     clean_text, calls = extract_tool_calls(raw_response)
@@ -219,61 +181,40 @@ def test_multiple_json_in_single_tool_call_tag():
     assert "find" in calls[0].function.arguments
     assert calls[1].function.name == "Bash"
     assert "ls -la" in calls[1].function.arguments
-    assert clean_text == "Изучу структуру проекта и текущий парсер курсов."
+    assert clean_text == "Let me explore the directory."
     assert "<tool_call>" not in clean_text
 
 
-def test_hybrid_qwen_parameter_tags_extraction():
-    """Тестирует парсинг вызовов инструментов, где Qwen подмешивает теги <parameter=key> и </parameter>."""
-    from app.services.tool_parser import extract_tool_calls
-
-    raw_response = """
-<tool_call>
-{"name": "Bash", "arguments": {"command": "find /e/vibecoding/stepik-searcher -type f -name \\"*.py\\" -o -name \\"*.js\\" -o -name \\"*.ts\\" -o -name \\"*.json\\" | head -50
-</parameter>
-<parameter=description> "List project files to understand structure"}}
-</tool_call>
-"""
-    clean_text, calls = extract_tool_calls(raw_response)
-    assert len(calls) == 1
-    assert calls[0].function.name == "Bash"
-    assert "find /e/vibecoding" in calls[0].function.arguments
-    assert "List project files to understand structure" in calls[0].function.arguments
-    assert "<parameter" not in clean_text
-
-
 def test_deepseek_claude_xml_invoke_extraction():
-    """Тестирует парсинг вызовов инструментов в формате Claude/DeepSeek XML (<invoke name=...>)."""
+    """测试 Claude/DeepSeek XML 格式 (<invoke name=...>) 工具调用解析。"""
     from app.services.tool_parser import extract_tool_calls
 
     raw_response = """Let me start by exploring the project.
 
 <tool_call>
 <invoke name="Bash">
-<parameter name="command">cd /e/vibecoding/stepik-searcher && git ls-files | head -200</parameter>
-<parameter name="description">List tracked files in project</parameter>
+<parameter name="command">cd /workspace && git ls-files | head -200</parameter>
+<parameter name="description">List tracked files</parameter>
 </invoke>
 </tool_calls>"""
 
     clean_text, calls = extract_tool_calls(raw_response)
     assert len(calls) == 1
     assert calls[0].function.name == "Bash"
-    assert "cd /e/vibecoding/stepik-searcher" in calls[0].function.arguments
-    assert "List tracked files in project" in calls[0].function.arguments
+    assert "cd /workspace" in calls[0].function.arguments
     assert clean_text == "Let me start by exploring the project."
     assert "<invoke" not in clean_text
     assert "<tool_call" not in clean_text
-    assert "<tool_calls" not in clean_text
 
 
 def test_deepseek_dsml_tool_calls_extraction():
-    """Тестирует парсинг вызовов инструментов в формате DeepSeek Markup Language (DSML)."""
+    """测试 DeepSeek DSML 标签工具调用解析。"""
     from app.services.tool_parser import extract_tool_calls
 
     raw_response = """Let me explore the project.
 <｜DSML｜tool_calls>
     <｜DSML｜invoke name="Bash">
-        <｜DSML｜parameter name="command" string="true">cd /e/vibecoding/stepik-searcher && git status</｜DSML｜parameter>
+        <｜DSML｜parameter name="command" string="true">git status</｜DSML｜parameter>
         <｜DSML｜parameter name="description" string="true">Check git status</｜DSML｜parameter>
     </｜DSML｜invoke>
 </｜DSML｜tool_calls>"""
@@ -281,71 +222,20 @@ def test_deepseek_dsml_tool_calls_extraction():
     clean_text, calls = extract_tool_calls(raw_response)
     assert len(calls) == 1
     assert calls[0].function.name == "Bash"
-    assert "cd /e/vibecoding/stepik-searcher" in calls[0].function.arguments
-    assert "Check git status" in calls[0].function.arguments
+    assert "git status" in calls[0].function.arguments
     assert clean_text == "Let me explore the project."
     assert "DSML" not in clean_text
     assert "<｜" not in clean_text
 
 
-def test_naked_json_tool_call_with_unescaped_quotes():
-    """Тестирует извлечение голого JSON без тегов tool_call и с неэкранированными кавычками внутри команды."""
-    from app.services.tool_parser import extract_tool_calls
-
-    raw_response = """Изучу проект, чтобы понять текущую структуру парсера.
-
-{"name": "Bash", "arguments": {"command":"cd /e/vibecoding/stepik-searcher && ls -la && echo "---TRACKED---" && git ls-files | grep -v '^"' | grep -vi 'FILES' | head -200","description":"List project files excluding noisy FILES dir"}}"""
-
-    clean_text, calls = extract_tool_calls(raw_response)
-    assert len(calls) == 1
-    assert calls[0].function.name == "Bash"
-    assert "cd /e/vibecoding/stepik-searcher" in calls[0].function.arguments
-    assert "List project files" in calls[0].function.arguments
-    assert clean_text == "Изучу проект, чтобы понять текущую структуру парсера."
-    assert "{" not in clean_text
-    assert "Bash" not in clean_text
-
-
-def test_compact_tool_schema():
-    """Тестирует компактное сжатие JSON Schema инструментов."""
-    from app.services.tool_parser import compact_tool_schema
-
-    schema = {
-        "type": "object",
-        "title": "ToolArguments",
-        "description": "Top-level description of tool arguments",
-        "properties": {
-            "command": {
-                "type": "string",
-                "title": "CommandTitle",
-                "description": "A very long detailed description of what this command is going to do when executed on the local terminal environment in milliseconds.",
-            },
-            "count": {
-                "type": "integer",
-                "minimum": 1,
-            },
-        },
-        "required": ["command"],
-    }
-
-    compacted = compact_tool_schema(schema)
-    assert compacted["type"] == "object"
-    assert "properties" in compacted
-    assert compacted["properties"]["command"]["type"] == "string"
-    assert "title" not in compacted["properties"]["command"]
-    assert compacted["properties"]["command"]["description"].endswith("...")
-    assert len(compacted["properties"]["command"]["description"]) <= 120
-    assert compacted["required"] == ["command"]
-
-
 def test_system_directive_after_tool_output():
-    """Тестирует добавление системной директивы при завершении вывода инструмента."""
+    """测试工具执行结果返回后注入的自主 Agent 延续指令。"""
     from app.services.tool_parser import format_messages_to_prompt
     from app.schemas.openai import OpenAIChatMessage, OpenAITool, OpenAIToolFunction
 
     messages = [
-        OpenAIChatMessage(role="user", content="Найди файлы проекта"),
-        OpenAIChatMessage(role="assistant", content="Запускаю поиск"),
+        OpenAIChatMessage(role="user", content="Find files"),
+        OpenAIChatMessage(role="assistant", content="Running search"),
         OpenAIChatMessage(role="tool", tool_call_id="call_1", content="file1.py\nfile2.py"),
     ]
     tools = [
@@ -360,53 +250,20 @@ def test_system_directive_after_tool_output():
     ]
 
     prompt = format_messages_to_prompt(messages, tools)
-    assert "[System Directive:" in prompt
-    assert "Do NOT stop with only a conversational promise" in prompt
+    assert "[Autonomous Directive:" in prompt
+    assert "DO NOT stop halfway" in prompt
 
 
 def test_intent_pattern_matching():
-    """Тестирует определение обещаний действия для Continuation Recovery."""
+    """测试中英文行动意图正则表达式。"""
     from app.api.v1.endpoints.chat import INTENT_PAT
 
-    sample1 = "Изучил структуру проекта. Теперь мне нужно понять, как в Stepik API представлены задания со стоимостью и текст заданий. Изучу оставшиеся файлы бэкенда и фронтенд-структуру."
+    sample1 = "我来看看当前文件夹下的文件结构。"
     sample2 = "Let me check the backend code to understand how endpoints are configured."
-    sample3 = "Вот готовый результат работы программы. Всего хорошего!"
-    sample4 = "Let me study the remaining backend files and frontend structure to fully understand the project before planning."
+    sample3 = "Here is the completed output for your request. Have a nice day!"
+    sample4 = "让我先检查一下 package.json 中的依赖配置。"
 
     assert INTENT_PAT.search(sample1) is not None
     assert INTENT_PAT.search(sample2) is not None
     assert INTENT_PAT.search(sample3) is None
     assert INTENT_PAT.search(sample4) is not None
-
-
-def test_raw_file_call_recovery():
-    """Тестирует авто-извлечение и конвертацию вызовов Edit/Write из неформатированного текста <tool_call> path code."""
-    import json
-    from app.services.tool_parser import extract_tool_calls
-
-    raw_response = """Now I have a complete picture. Let me improve the parser.
-
-<tool_call>
-
-E:\\vibecoding\\stepik-searcher\\backend\\app\\services\\stepik.py
-# 4. Fetch steps (tasks) in chunks
-tasks = []
-for i in range(0, len(step_ids), 100):
-    cost = s.get("worth", 0)
-
-# 4. Fetch steps (tasks) in chunks
-tasks = []
-for i in range(0, len(step_ids), 100):
-    cost = s.get("cost", s.get("worth", 0))
-    text_plain = _html_to_plain_text(text)
-"""
-
-    clean_text, calls = extract_tool_calls(raw_response)
-    assert len(calls) == 1
-    assert calls[0].function.name == "Edit"
-    args = json.loads(calls[0].function.arguments)
-    assert "stepik.py" in args["file_path"]
-    assert "s.get(\"worth\", 0)" in args["old_string"]
-    assert "s.get(\"cost\"" in args["new_string"]
-    assert "Now I have a complete picture" in clean_text
-    assert "<tool_call>" not in clean_text

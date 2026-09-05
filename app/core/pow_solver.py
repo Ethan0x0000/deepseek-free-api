@@ -18,21 +18,21 @@ class PoWSolver:
     def __init__(self, worker_path: Path = WASM_WORKER_PATH):
         self.worker_path = worker_path
         if not self.worker_path.exists():
-            raise FileNotFoundError(f"WASM воркер не найден по пути {self.worker_path}")
+            raise FileNotFoundError(f"未找到 WASM Worker 脚本: {self.worker_path}")
         self._ensure_wasm_file()
 
     def _ensure_wasm_file(self):
         wasm_file = self.worker_path.parent / "sha3_wasm_bg.wasm"
         if not wasm_file.exists():
             try:
-                logger.info("Загрузка sha3_wasm_bg.wasm...")
+                logger.info("正在下载 sha3_wasm_bg.wasm 文件...")
                 with httpx.Client(timeout=15.0) as client:
                     resp = client.get(DEEPSEEK_WASM_FALLBACK_URL)
                     if resp.status_code == 200 and resp.content[:4] == b"\x00asm":
                         wasm_file.write_bytes(resp.content)
-                        logger.info("sha3_wasm_bg.wasm успешно загружен.")
+                        logger.info("sha3_wasm_bg.wasm 下载完成。")
             except Exception as e:
-                logger.warning(f"Не удалось автоматически загрузить sha3_wasm_bg.wasm: {e}")
+                logger.warning(f"自动下载 sha3_wasm_bg.wasm 失败: {e}")
 
     async def get_challenge(self, client: httpx.AsyncClient, target_path: str = "/api/v0/chat/completion") -> Dict[str, Any]:
         url = f"{settings.DEEPSEEK_BASE_URL}/api/v0/chat/create_pow_challenge"
@@ -64,7 +64,7 @@ class PoWSolver:
             challenge = biz_data.get("challenge") or (biz_data if "algorithm" in biz_data else None)
 
         if not isinstance(result, dict) or result.get("code") != 0 or not challenge:
-            raise ValueError(f"Ошибка при получении PoW challenge: {result}")
+            raise ValueError(f"获取 PoW 挑战失败: {result}")
 
         return challenge
 
@@ -92,13 +92,13 @@ class PoWSolver:
         stdout, stderr = await proc.communicate()
         if proc.returncode != 0:
             err_msg = stderr.decode(errors="replace").strip()
-            raise RuntimeError(f"Ошибка вычисления PoW в WASM воркере: {err_msg}")
+            raise RuntimeError(f"WASM Worker 计算 PoW 失败: {err_msg}")
 
         answer_str = stdout.decode().strip()
         answer = int(float(answer_str))
 
         if answer < 0:
-            raise RuntimeError(f"Не удалось найти решение PoW для сложности {difficulty}")
+            raise RuntimeError(f"未找到难度 {difficulty} 的有效 PoW 求解")
 
         pow_response = {
             "algorithm": algorithm,

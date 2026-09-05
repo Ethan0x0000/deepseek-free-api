@@ -1,20 +1,20 @@
 import json
 import logging
-from typing import AsyncGenerator, List, Optional
+from typing import AsyncGenerator, Dict, List, Optional, Tuple, Any
 from fastapi import HTTPException, status
 import httpx
 
 from app.core.config import settings
 from app.core.credentials import credentials_manager
+from app.core.pow_solver import pow_solver
 from app.schemas.chat import (
     DeepSeekChatRequest,
     DeepSeekChatResponse,
     ModelInfo,
     StreamChunk,
 )
-from app.core.pow_solver import pow_solver
 from app.services.session_manager import session_manager
-from app.services.sse_parser import parse_sse_lines, parse_sse_stream
+from app.services.sse_parser import parse_sse_lines
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +23,7 @@ AVAILABLE_MODELS = [
     ModelInfo(
         id="deepseek-v4-pro",
         name="DeepSeek V4 Pro",
-        description="Флагманская модель 1.6T MoE (49B active) для сложного программирования, математики и глубоких рассуждений.",
+        description="1.6T MoE 旗舰模型 (49B 激活参数)，专为复杂编程、代码重构、数学与深度推理优化。",
         model_type="expert",
         supports_thinking=True,
         supports_search=False,
@@ -31,7 +31,7 @@ AVAILABLE_MODELS = [
     ModelInfo(
         id="deepseek-v4-flash",
         name="DeepSeek V4 Flash",
-        description="Сверхбыстрая и эффективная модель 284B MoE (13B active) для быстрого чата и оперативных задач.",
+        description="284B MoE 超高速模型 (13B 激活参数)，低延迟快速响应，适合轻量级任务与高频调用。",
         model_type="default",
         supports_thinking=False,
         supports_search=True,
@@ -39,7 +39,7 @@ AVAILABLE_MODELS = [
     ModelInfo(
         id="deepseek-v4-flash-vision-exp",
         name="DeepSeek V4 Flash Vision",
-        description="Мультимодальная модель DeepSeek V4 с визуальным пониманием графиков, кода и документов.",
+        description="DeepSeek V4 视觉多模态模型，支持图片理解、图表识别与视觉代码分析。",
         model_type="vision",
         supports_thinking=False,
         supports_search=True,
@@ -47,23 +47,23 @@ AVAILABLE_MODELS = [
     ModelInfo(
         id="deepseek-reasoner",
         name="DeepSeek R1 (Reasoner)",
-        description="Специализированная модель рассуждений DeepSeek-R1 с подробным пошаговым выводом мыслей.",
+        description="DeepSeek-R1 深度思考推理模型，提供完整的思维链推理过程输出。",
         model_type="expert",
         supports_thinking=True,
         supports_search=False,
     ),
     ModelInfo(
         id="deepseek-chat",
-        name="DeepSeek V3 (Chat)",
-        description="Быстрая языковая модель общего назначения DeepSeek V3 (режим expert).",
+        name="DeepSeek V3",
+        description="DeepSeek V3 通用对话模型 (专家模式)。",
         model_type="expert",
         supports_thinking=True,
-        supports_search=True,
+        supports_search=False,
     ),
     ModelInfo(
         id="deepseek-search",
-        name="DeepSeek V3 (Web Search)",
-        description="DeepSeek V3 с включенным веб-поиском по актуальной информации в реальном времени.",
+        name="DeepSeek V3 (Search)",
+        description="内置实时联网搜索增强的 DeepSeek 对话模型。",
         model_type="default",
         supports_thinking=False,
         supports_search=True,
@@ -72,24 +72,31 @@ AVAILABLE_MODELS = [
 
 
 class DeepSeekClient:
-    """Клиент для взаимодействия с веб-интерфейсом DeepSeek (с поддержкой PoW и SSE-стриминга)."""
+    """与 DeepSeek Web 界面通信的客户端 (支持自动 PoW 求解与 SSE 流式解析)。"""
 
-    def __init__(self, http_client: Optional[httpx.AsyncClient] = None):
-        self.client = http_client or httpx.AsyncClient(timeout=settings.REQUEST_TIMEOUT)
+    def __init__(self, client: Optional[httpx.AsyncClient] = None):
+        self._external_client = client
+        self._internal_client: Optional[httpx.AsyncClient] = None
+        self.session_manager = session_manager
 
-    def get_models(self) -> List[ModelInfo]:
-        return AVAILABLE_MODELS
+    @property
+    def client(self) -> httpx.AsyncClient:
+        if self._external_client:
+            return self._external_client
+        if self._internal_client is None or self._internal_client.is_closed:
+            self._internal_client = httpx.AsyncClient(timeout=settings.REQUEST_TIMEOUT)
+        return self._internal_client
 
     def resolve_model_params(
         self,
         model_name: str,
         thinking_enabled: Optional[bool] = None,
-        search_enabled: Optional[bool] = None,
-    ) -> tuple[str, bool, bool]:
-        """Определяет внутренний model_type и флаги thinking / search."""
+        search_enabled: Optional[bool] = None
+    ) -> Tuple[str, bool, bool]:
+        """解析并返回内部 model_type 以及 thinking / search 标志。默认开启思维链。"""
         model_lower = model_name.lower().strip()
 
-        # 1. Модели семейства DeepSeek V4
+        # 1. DeepSeek V4 系列
         if model_lower in ["deepseek-v4-pro", "v4-pro", "v4", "deepseek-v4", "pro"]:
             model_type = "expert"
             think = True if thinking_enabled is None else thinking_enabled
@@ -103,19 +110,19 @@ class DeepSeekClient:
             think = True if thinking_enabled is None else thinking_enabled
             search = search_enabled if search_enabled is not None else False
 
-        # 2. Модели поиска
+        # 2. 联网搜索模型
         elif search_enabled is True or model_lower in ["deepseek-search", "search"]:
             model_type = "default"
             think = True if thinking_enabled is None else thinking_enabled
             search = True
 
-        # 3. Модели рассуждений (DeepSeek-R1)
+        # 3. 推理模型 (DeepSeek-R1)
         elif thinking_enabled is True or model_lower in ["deepseek-reasoner", "r1", "reasoner", "deepseek_reasoner"]:
             model_type = "expert"
             think = True
             search = False
 
-        # 4. Базовый чат DeepSeek-V3
+        # 4. 默认通用对话
         else:
             model_type = "expert"
             think = True if thinking_enabled is None else thinking_enabled
@@ -127,35 +134,35 @@ class DeepSeekClient:
         self,
         request: DeepSeekChatRequest
     ) -> AsyncGenerator[StreamChunk, None]:
-        """Выполняет стриминговый запрос к DeepSeek с автоматическим решением PoW."""
+        """向 DeepSeek 发送流式对话请求并自动求解 PoW。"""
         if not credentials_manager.is_authenticated():
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Учетные данные DeepSeek не настроены. Укажите токен через /api/v1/auth/token или файл credentials.json."
+                detail="DeepSeek 认证凭证未配置。请通过 /api/v1/auth/token 接口或 credentials.json 提供 Token。"
             )
 
-        # 1. Получаем или создаем сессию
+        # 1. 获取或创建会话
         session_id = await session_manager.get_or_create_session(self.client, request.chat_session_id)
         
-        # 2. Определяем parent_message_id
+        # 2. 确定 parent_message_id
         parent_msg_id = request.parent_message_id
         if parent_msg_id is None:
             parent_msg_id = session_manager.get_parent_message_id(session_id)
 
-        # 3. Определяем параметры модели
+        # 3. 确定模型参数
         model_type, thinking_enabled, search_enabled = self.resolve_model_params(
             request.model, request.thinking_enabled, request.search_enabled
         )
 
-        # 4. Решаем PoW challenge
+        # 4. 计算 PoW challenge
         target_path = "/api/v0/chat/completion"
         try:
             pow_header = await pow_solver.get_pow_header(self.client, target_path)
         except Exception as e:
-            logger.error(f"Ошибка вычисления PoW: {e}")
+            logger.error(f"计算 PoW 挑战失败: {e}")
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"Ошибка решения Proof-of-Work для DeepSeek: {str(e)}"
+                detail=f"求解 DeepSeek Proof-of-Work 失败: {str(e)}"
             )
 
         headers = {
@@ -175,10 +182,10 @@ class DeepSeekClient:
             "user-agent": settings.USER_AGENT,
         }
 
-        # 4.1. Специальная обработка для Vision (изображения / файлы)
+        # 4.1. 针对视觉多模态的特殊处理
         if request.ref_file_ids or model_type == "vision":
             model_type = "vision"
-            search_enabled = False  # DeepSeek Web отключает поиск при наличии файлов
+            search_enabled = False  # DeepSeek 网页端存在文件时禁用搜索
             token = credentials_manager.get_token("deepseek")
             if token:
                 try:
@@ -186,7 +193,7 @@ class DeepSeekClient:
                     hif_headers = await hif_provider.get_headers(self.client, token)
                     headers.update(hif_headers)
                 except Exception as hif_err:
-                    logger.warning(f"Error fetching HIF headers for vision: {hif_err}")
+                    logger.warning(f"获取 Vision HIF 签名失败: {hif_err}")
             headers["x-client-version"] = "2.3.0"
             headers["x-app-version"] = "2.3.0"
 
@@ -213,63 +220,65 @@ class DeepSeekClient:
             if resp.status_code != 200:
                 body = await resp.aread()
                 err_text = body.decode("utf-8", errors="replace")
-                logger.error(f"DeepSeek returned status {resp.status_code}: {err_text}")
+                logger.error(f"DeepSeek 返回错误状态码 {resp.status_code}: {err_text}")
                 if resp.status_code in [400, 404] or "session" in err_text.lower():
                     session_manager.invalidate_current_session()
                 raise HTTPException(
                     status_code=resp.status_code,
-                    detail=f"DeepSeek API error ({resp.status_code}): {err_text}"
+                    detail=f"DeepSeek 错误: {err_text}"
                 )
 
-            async for chunk in parse_sse_lines(resp.aiter_lines(), session_id=session_id):
-                if chunk.type == "error":
-                    if "session" in chunk.text.lower() or "not found" in chunk.text.lower():
-                        session_manager.invalidate_current_session()
-                if chunk.message_id is not None:
+            async for chunk in parse_sse_lines(resp.aiter_lines(), session_id):
+                if chunk.message_id:
                     last_message_id = chunk.message_id
                 if chunk.type == "title" and chunk.text:
                     extracted_title = chunk.text
                 yield chunk
 
         finally:
-            if last_message_id is not None:
+            if last_message_id:
                 session_manager.update_session_state(session_id, last_message_id, extracted_title)
 
-    async def send_message(self, request: DeepSeekChatRequest) -> DeepSeekChatResponse:
-        """Синхронная обертка над stream_chat, возвращающая полный ответ целиком."""
+    async def send_message(
+        self,
+        request: DeepSeekChatRequest
+    ) -> DeepSeekChatResponse:
+        """stream_chat 的同步聚合包装，等待并返回完整回答。"""
         full_thinking = []
         full_content = []
-        message_id = 0
-        token_usage = None
+        session_id = request.chat_session_id or ""
+        last_msg_id = 0
         error_msg = None
+        token_usage = None
 
         async for chunk in self.stream_chat(request):
-            if chunk.session_id:
-                session_id = chunk.session_id
-            if chunk.message_id:
-                message_id = chunk.message_id
-            if chunk.token_usage:
-                token_usage = chunk.token_usage
-
-            if chunk.type == "error":
-                error_msg = chunk.text
-            elif chunk.type == "thinking":
+            if chunk.type == "thinking":
                 full_thinking.append(chunk.text)
             elif chunk.type == "content":
                 full_content.append(chunk.text)
+            elif chunk.type == "error":
+                error_msg = chunk.text
+            if chunk.session_id:
+                session_id = chunk.session_id
+            if chunk.message_id:
+                last_msg_id = chunk.message_id
+            if chunk.token_usage:
+                token_usage = chunk.token_usage
 
-        if not full_content and error_msg:
+        if error_msg:
             raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS if ("частые" in error_msg.lower() or "too frequent" in error_msg.lower()) else status.HTTP_502_BAD_GATEWAY,
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS if ("频繁" in error_msg.lower() or "too frequent" in error_msg.lower()) else status.HTTP_502_BAD_GATEWAY,
                 detail=error_msg
             )
 
+        thinking_text = "".join(full_thinking)
+        content_text = "".join(full_content)
+
         return DeepSeekChatResponse(
             session_id=session_id,
-            message_id=message_id,
-            parent_message_id=request.parent_message_id,
-            thinking="".join(full_thinking) if full_thinking else None,
-            content="".join(full_content),
+            message_id=last_msg_id,
+            thinking=thinking_text if thinking_text else None,
+            content=content_text,
             token_usage=token_usage,
             status="FINISHED",
         )

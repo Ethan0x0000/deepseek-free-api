@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 def clean_deepseek_token(val: Optional[str]) -> Optional[str]:
-    """Проверяет и очищает токен DeepSeek. Отсекает 'null', 'undefined' и пустые объекты."""
+    """验证并清洗 DeepSeek Token，过滤掉 'null'、'undefined' 或空对象。"""
     if not val or not isinstance(val, str):
         return None
     
@@ -20,7 +20,7 @@ def clean_deepseek_token(val: Optional[str]) -> Optional[str]:
     if t in ["null", "undefined", "None", "", "{}", "[]"]:
         return None
         
-    # Если в localStorage лежит объект вида {"value": null, "__version": "0"}
+    # 如果 localStorage 中存的是 {"value": null, "__version": "0"} 对象
     if t.startswith("{"):
         try:
             data = json.loads(t)
@@ -34,7 +34,7 @@ def clean_deepseek_token(val: Optional[str]) -> Optional[str]:
     if "value\":null" in t or "value\": null" in t:
         return None
 
-    # Настоящий токен DeepSeek - это длинная строка (обычно JWT или токен сессии >= 30 символов)
+    # DeepSeek 真实 Token 长度通常 >= 30
     if len(t) >= 30 and (t.startswith("ey") or "." in t or len(t) >= 40):
         return t
         
@@ -42,7 +42,7 @@ def clean_deepseek_token(val: Optional[str]) -> Optional[str]:
 
 
 def clean_qwen_token(val: Optional[str]) -> Optional[str]:
-    """Проверяет и очищает сессионные Cookie/JWT для Qwen."""
+    """验证并清洗 Qwen 的会话 Cookie / JWT Token。"""
     if not val or not isinstance(val, str):
         return None
     t = val.strip()
@@ -57,8 +57,8 @@ async def extract_token_via_browser(
     timeout_seconds: int = 300,
 ) -> Optional[str]:
     """
-    Открывает системный браузер Google Chrome (или Edge),
-    ждет реального входа пользователя в аккаунт и перехватывает токен авторизации.
+    打开系统原生浏览器 (Chrome 或 Edge)，
+    等待用户扫码/登录账号，并在网络与本地存储中自动拦截捕获 Token。
     """
     prov = provider.lower().strip()
     profile_dir = os.path.abspath(".browser_profile")
@@ -82,21 +82,21 @@ async def extract_token_via_browser(
                         "--start-maximized",
                     ],
                 )
-                logger.info(f"Браузер ({ch}) запущен.")
+                logger.info(f"浏览器 ({ch}) 启动成功。")
                 break
             except Exception as e:
-                logger.debug(f"Канал {ch} недоступен: {e}")
+                logger.debug(f"通道 {ch} 不可用: {e}")
 
         if not browser:
             try:
                 browser = await p.chromium.launch(headless=headless)
             except Exception as e:
-                logger.error(f"Не удалось запустить браузер: {e}")
+                logger.error(f"无法启动浏览器: {e}")
                 return None
 
         context_kwargs = {
             "no_viewport": True,
-            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
+            "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36",
         }
         if os.path.exists(state_file):
             try:
@@ -107,7 +107,7 @@ async def extract_token_via_browser(
         context = await browser.new_context(**context_kwargs)
         page = await context.new_page()
 
-        # 1. Перехват исходящих сетевых запросов
+        # 1. 拦截出站请求头中的 Authorization
         async def on_request(request):
             nonlocal extracted_token
             req_url = request.url
@@ -119,7 +119,7 @@ async def extract_token_via_browser(
                     valid_tok = clean_deepseek_token(raw_tok)
                     if valid_tok and not extracted_token:
                         extracted_token = valid_tok
-                        logger.info("Валидный токен DeepSeek перехвачен из сетевого запроса!")
+                        logger.info("成功从网络请求中捕获有效的 DeepSeek Token！")
 
             elif prov == "qwen":
                 if auth_hdr and "Bearer " in auth_hdr and "chat.qwen.ai" in req_url:
@@ -127,28 +127,27 @@ async def extract_token_via_browser(
                     valid_tok = clean_qwen_token(raw_tok)
                     if valid_tok and not extracted_token:
                         extracted_token = valid_tok
-                        logger.info("Валидный токен Qwen перехвачен из сетевого запроса!")
+                        logger.info("成功从网络请求中捕获有效的 Qwen Token！")
 
         page.on("request", on_request)
 
-        # 2. Мгновенный переход на страницу входа
+        # 2. 导航至登录页面
         try:
             await page.goto(target_url, wait_until="commit", timeout=60000)
         except Exception as e:
-            logger.warning(f"Навигация: {e}")
+            logger.warning(f"页面导航提示: {e}")
 
-        # 3. Ожидание авторизации пользователя (до 5 минут)
+        # 3. 等待用户登录 (最长 5 分钟)
         for sec in range(timeout_seconds):
             if extracted_token:
                 break
 
-            # Если пользователь закрыл вкладку/окно
             if page.is_closed():
                 break
 
             try:
                 if prov == "deepseek":
-                    # Проверяем userToken в localStorage
+                    # 检查 localStorage 中的 userToken
                     ls_val = await page.evaluate("""() => {
                         try {
                             const raw = localStorage.getItem('userToken');
@@ -161,7 +160,7 @@ async def extract_token_via_browser(
                     valid_tok = clean_deepseek_token(ls_val)
                     if valid_tok:
                         extracted_token = valid_tok
-                        logger.info("Валидный токен DeepSeek извлечен из localStorage!")
+                        logger.info("成功从 localStorage 中提取有效的 DeepSeek Token！")
                         break
 
                 elif prov == "qwen":
@@ -176,7 +175,7 @@ async def extract_token_via_browser(
 
                     if cookie_parts and found_jwt:
                         extracted_token = "; ".join(cookie_parts)
-                        logger.info("Сессионные Cookie и токен Qwen успешно извлечены!")
+                        logger.info("成功提取 Qwen 会话 Cookie 与 Token！")
                         break
 
             except Exception:
@@ -197,17 +196,25 @@ async def extract_token_via_browser(
 
     if extracted_token:
         credentials_manager.save(extracted_token, provider=prov)
-        logger.info(f"✓ Токен для {prov} успешно сохранен в credentials.json!")
+        logger.info(f"✓ {prov} Token 已成功保存至 credentials.json！")
         return extracted_token
 
     return None
 
 
+class BrowserAuthService:
+    async def login_and_capture_token(self, provider: str = "deepseek") -> Optional[str]:
+        return await extract_token_via_browser(provider=provider, headless=False)
+
+
+browser_auth_service = BrowserAuthService()
+
+
 if __name__ == "__main__":
     prov_arg = sys.argv[1] if len(sys.argv) > 1 else "deepseek"
-    print(f"Запуск окна браузера для {prov_arg}...")
+    print(f"正在启动浏览器登录窗口 ({prov_arg})...")
     res = asyncio.run(extract_token_via_browser(provider=prov_arg, headless=False, timeout_seconds=300))
     if res:
-        print(f"\n[УСПЕХ] Токен для {prov_arg} успешно получен и сохранен в credentials.json!")
+        print(f"\n[成功] {prov_arg} Token 获取成功并已保存至 credentials.json！")
     else:
-        print(f"\n[ОШИБКА] Не удалось получить токен (пользователь не вошел в аккаунт или окно закрыто).")
+        print(f"\n[失败] 未能获取到 Token (未完成登录或窗口被手动关闭)。")

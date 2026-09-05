@@ -7,7 +7,7 @@ logger = logging.getLogger(__name__)
 
 
 def normalize_fragment_type(raw_type: Any, stage_id: Optional[int] = None) -> str:
-    """Нормализует тип фрагмента ответа DeepSeek в THINKING или RESPONSE."""
+    """标准化 DeepSeek 响应分块类型为 THINKING 或 RESPONSE。"""
     if raw_type:
         s = str(raw_type).strip().upper()
         if s in ["THINKING", "THINK", "THOUGHT", "REASONING", "PLANNING"]:
@@ -20,7 +20,7 @@ def normalize_fragment_type(raw_type: Any, stage_id: Optional[int] = None) -> st
 
 
 class SSEParser:
-    """Парсер событий Server-Sent Events (SSE) от веб-интерфейса DeepSeek."""
+    """DeepSeek 网页端 Server-Sent Events (SSE) 事件流解析器。"""
 
     def __init__(self, session_id: Optional[str] = None):
         self.session_id = session_id
@@ -40,12 +40,12 @@ class SSEParser:
         try:
             return json.loads(data_str)
         except json.JSONDecodeError:
-            logger.debug(f"Не удалось распарсить JSON: {data_str}")
+            logger.debug(f"JSON 解析失败: {data_str}")
             return None
 
     def _apply_patch(self, path: str, op: str, val: Any) -> Optional[StreamChunk]:
-        """Универсальный рекурсивный обработчик JSON-патчей от DeepSeek."""
-        # 1. Рекурсивная обработка BATCH операций
+        """递归解析 DeepSeek 的 JSON-Patch 流事件。"""
+        # 1. 递归处理 BATCH 批量操作
         if op == "BATCH" and isinstance(val, list):
             last_chunk = None
             for item in val:
@@ -66,7 +66,7 @@ class SSEParser:
                         last_chunk = chunk
             return last_chunk
 
-        # 2. Обработка счетчика токенов
+        # 2. 捕获官方 Token 计数
         if "accumulated_token_usage" in path and val is not None:
             try:
                 self.token_usage = int(val)
@@ -74,12 +74,12 @@ class SSEParser:
                 pass
             return None
 
-        # 3. Завершение блока рассуждений (status: FINISHED или elapsed_secs)
+        # 3. 思考链分块结束 (status: FINISHED 或 elapsed_secs)
         if ("fragments/0" in path or "fragments/-1" in path) and (path.endswith("/status") and val == "FINISHED" or path.endswith("/elapsed_secs")):
             self.current_fragment_type = "RESPONSE"
             return None
 
-        # 4. Общий статус ответа FINISHED
+        # 4. 全局响应状态 FINISHED
         if path == "response/status" and val == "FINISHED":
             self.is_finished = True
             return StreamChunk(
@@ -90,7 +90,7 @@ class SSEParser:
                 token_usage=self.token_usage,
             )
 
-        # 5. Добавление списка фрагментов: response/fragments -> [{"id": 3, "type": "RESPONSE", "content": "..."}]
+        # 5. 追加分块列表: response/fragments -> [{"id": 3, "type": "RESPONSE", "content": "..."}]
         if "fragments" in path and isinstance(val, list):
             for frag in val:
                 if isinstance(frag, dict):
@@ -111,7 +111,7 @@ class SSEParser:
                         )
             return None
 
-        # 6. Добавление или установка единичного фрагмента с объектом (dict)
+        # 6. 设置单一分块对象
         if "fragments" in path and isinstance(val, dict):
             f_type = normalize_fragment_type(val.get("type"), val.get("stage_id"))
             self.current_fragment_type = f_type
@@ -130,17 +130,17 @@ class SSEParser:
                 )
             return None
 
-        # 7. Изменение типа фрагмента: response/fragments/.../type
+        # 7. 更新分块类型
         if "fragments" in path and path.endswith("/type") and isinstance(val, str):
             self.current_fragment_type = normalize_fragment_type(val)
             return None
 
-        # 8. Изменение stage_id: response/fragments/.../stage_id
+        # 8. 更新 stage_id
         if "fragments" in path and path.endswith("/stage_id"):
             self.current_fragment_type = "THINKING" if val == 1 else "RESPONSE"
             return None
 
-        # 9. Добавление строки в фрагмент: response/fragments/.../content
+        # 9. 向分块追加文本: response/fragments/.../content
         if "fragments" in path and (op == "APPEND" or not op) and isinstance(val, str):
             text_piece = val
             if "<think>" in text_piece:
@@ -153,7 +153,7 @@ class SSEParser:
             if not text_piece:
                 return None
 
-            # Если путь явно указывает на fragment 1 или 2 (ответ)
+            # 区分思考链和正文
             if "fragments/1" in path or "fragments/2" in path:
                 self.current_fragment_type = "RESPONSE"
                 chunk_type = "content"
@@ -180,7 +180,7 @@ class SSEParser:
         return None
 
     def process_event(self, event_type: str, data_str: str) -> Optional[StreamChunk]:
-        """Обрабатывает одно SSE событие."""
+        """处理单条 SSE 事件。"""
         data = self._parse_json(data_str)
 
         # 1. event: ready
@@ -209,14 +209,14 @@ class SSEParser:
                 session_id=self.session_id
             )
 
-        # 3.5. event: hint (ошибки валидации от DeepSeek, например input_exceeds_limit)
+        # 3.5. event: hint (DeepSeek 校验报错或限流)
         if event_type == "hint":
             err_content = ""
             if isinstance(data, dict):
                 err_content = data.get("content") or data.get("finish_reason") or ""
             elif isinstance(data, str):
                 err_content = data
-            logger.warning(f"DeepSeek вернул событие hint: {err_content}")
+            logger.warning(f"DeepSeek 返回 hint 事件: {err_content}")
             return StreamChunk(
                 type="error",
                 text=f"DeepSeek error: {err_content}",
@@ -234,9 +234,8 @@ class SSEParser:
                 token_usage=self.token_usage,
             )
 
-        # 5. Обработка data сообщений
+        # 5. 处理 data 数据
         if isinstance(data, dict):
-            # Начальная инициализация структуры ответа
             if "v" in data and isinstance(data["v"], dict) and isinstance(data["v"].get("response"), dict):
                 resp = data["v"]["response"]
                 self.message_id = resp.get("message_id", self.message_id)
@@ -260,7 +259,7 @@ class SSEParser:
                                     return StreamChunk(type="content", text=f_content, message_id=self.message_id, session_id=self.session_id)
                 return None
 
-            # Простое добавление текста: data: {"v": " текст"}
+            # 简易文本分块: data: {"v": "..."}
             if "v" in data and isinstance(data["v"], str) and "p" not in data and "o" not in data:
                 text_piece = data["v"]
                 if "<think>" in text_piece:
@@ -280,7 +279,7 @@ class SSEParser:
                     self.response_text += text_piece
                     return StreamChunk(type="content", text=text_piece, message_id=self.message_id, session_id=self.session_id)
 
-            # JSON-патчи с указанием пути "p" и операции "o"
+            # JSON-Patch 分块: 路径 "p" 和操作 "o"
             path = data.get("p", "") or ""
             op = data.get("o", "") or ""
             val = data.get("v")
@@ -291,7 +290,7 @@ class SSEParser:
 
 
 async def parse_sse_lines(line_stream: AsyncGenerator[str, None], session_id: Optional[str] = None) -> AsyncGenerator[StreamChunk, None]:
-    """Генератор, мгновенно парсящий поток строк SSE ответа DeepSeek в структурированные StreamChunk."""
+    """将 DeepSeek SSE 文本行流实时解析为 StreamChunk 对象的异步生成器。"""
     parser = SSEParser(session_id=session_id)
     current_event = "message"
 
@@ -310,13 +309,13 @@ async def parse_sse_lines(line_stream: AsyncGenerator[str, None], session_id: Op
             if data_content.startswith(" "):
                 data_content = data_content[1:]
             chunk = parser.process_event(current_event, data_content)
-            current_event = "message"  # Сброс типа события после каждого data-сообщения по стандарту SSE
+            current_event = "message"
             if chunk:
                 yield chunk
 
 
 async def parse_sse_stream(byte_stream: AsyncGenerator[bytes, None], session_id: Optional[str] = None) -> AsyncGenerator[StreamChunk, None]:
-    """Генератор, парсящий сырые байты SSE ответа DeepSeek в структурированные StreamChunk."""
+    """将 DeepSeek SSE 字节流实时解析为 StreamChunk 对象的异步生成器。"""
     parser = SSEParser(session_id=session_id)
     buffer = ""
     current_event = "message"
@@ -342,6 +341,6 @@ async def parse_sse_stream(byte_stream: AsyncGenerator[bytes, None], session_id:
                 if data_content.startswith(" "):
                     data_content = data_content[1:]
                 chunk = parser.process_event(current_event, data_content)
-                current_event = "message"  # Сброс типа события после каждого data-сообщения по стандарту SSE
+                current_event = "message"
                 if chunk:
                     yield chunk

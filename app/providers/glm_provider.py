@@ -21,7 +21,7 @@ GLM_MODELS = [
     ModelInfo(
         id="glm-5.3",
         name="GLM 5.3",
-        description="Флагманская веб-модель Zhipu AI GLM 5.3 с мощными рассуждениями.",
+        description="智谱 AI 旗舰 Web 模型 GLM 5.3，具备强劲的深度推理能力。",
         model_type="expert",
         supports_thinking=True,
         supports_search=True,
@@ -29,7 +29,7 @@ GLM_MODELS = [
     ModelInfo(
         id="glm-5.2",
         name="GLM 5.2",
-        description="Модель GLM 5.2 общего назначения.",
+        description="通用综合任务 GLM 5.2 模型。",
         model_type="expert",
         supports_thinking=True,
         supports_search=True,
@@ -37,7 +37,7 @@ GLM_MODELS = [
     ModelInfo(
         id="glm-5-pro",
         name="GLM 5 Pro",
-        description="Профессиональная модель GLM-5 для сложных задач анализа и синтеза информации.",
+        description="专业级 GLM-5 模型，适用于复杂分析与内容合成任务。",
         model_type="expert",
         supports_thinking=True,
         supports_search=True,
@@ -45,7 +45,7 @@ GLM_MODELS = [
     ModelInfo(
         id="glm-5-coder",
         name="GLM 5 Coder",
-        description="Специализированная модель линейки GLM-5 для программирования и рефакторинга.",
+        description="GLM-5 编程专项模型，专为代码编写与架构重构优化。",
         model_type="expert",
         supports_thinking=True,
         supports_search=False,
@@ -53,7 +53,7 @@ GLM_MODELS = [
     ModelInfo(
         id="glm-5-flash",
         name="GLM 5 Flash",
-        description="Высокоскоростная модель Zhipu AI с минимальной задержкой.",
+        description="高速低延迟轻量级模型。",
         model_type="default",
         supports_thinking=False,
         supports_search=True,
@@ -61,15 +61,15 @@ GLM_MODELS = [
     ModelInfo(
         id="glm-4-plus",
         name="GLM 4 Plus",
-        description="Флагман поколения GLM-4.",
+        description="GLM-4 代次主力大模型。",
         model_type="expert",
         supports_thinking=False,
         supports_search=True,
     ),
     ModelInfo(
         id="glm-4-flash",
-        name="GLM 4 Flash (Бесплатный API)",
-        description="Полностью бесплатная и сверхбыстрая модель Zhipu BigModel без капчи.",
+        name="GLM 4 Flash (官方免费 API)",
+        description="智谱开放平台官方永久免费、高吞吐无验证码模型。",
         model_type="default",
         supports_thinking=False,
         supports_search=True,
@@ -79,10 +79,10 @@ GLM_MODELS = [
 
 class GLMProvider(BaseLLMProvider):
     """
-    Провайдер для GLM (Zhipu AI).
-    Поддерживает:
-    1. Веб-интерфейс chat.z.ai (/api/v2/chat/completions и /api/v1/chats).
-    2. BigModel API (open.bigmodel.cn/api/paas/v4/chat/completions) - без капчи и с бесплатным GLM-4-Flash.
+    GLM (智谱 AI) 提供商。
+    支持:
+    1. chat.z.ai 网页接口 (/api/v2/chat/completions 与 /api/v1/chats)。
+    2. 智谱开放平台 BigModel API (open.bigmodel.cn/api/paas/v4/chat/completions) - 免验证码且含免费 GLM-4-Flash。
     """
 
     def __init__(self, http_client: httpx.AsyncClient):
@@ -122,18 +122,18 @@ class GLMProvider(BaseLLMProvider):
                         if isinstance(it, dict):
                             results.append({
                                 "id": it.get("id"),
-                                "title": it.get("title") or "Без названия",
+                                "title": it.get("title") or "未命名",
                                 "created_at": it.get("created_at"),
                                 "updated_at": it.get("updated_at"),
                                 "provider": "glm"
                             })
                 return results
         except Exception as e:
-            logger.warning(f"Ошибка получения списка сессий GLM: {e}")
+            logger.warning(f"获取 GLM 历史会话失败: {e}")
         return []
 
     def _extract_user_id(self, token_or_cookie: str) -> str:
-        """Извлекает user_id или id из JWT токена."""
+        """从 JWT Token 提取 user_id。"""
         try:
             jwt_token = token_or_cookie
             if "token=" in token_or_cookie:
@@ -198,7 +198,7 @@ class GLMProvider(BaseLLMProvider):
         if not token:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="Учетные данные GLM не настроены. Укажите токен через команду /token glm <токен>."
+                detail="GLM 认证凭证未配置。请通过命令 /token glm <token> 设置凭证。"
             )
 
         chat_id = request.chat_session_id or self._current_chat_id or str(uuid.uuid4())
@@ -206,13 +206,13 @@ class GLMProvider(BaseLLMProvider):
 
         yield StreamChunk(type="session", text=chat_id, session_id=chat_id)
 
-        # 1. Если это официальный BigModel API ключ (содержит точку, но не JWT с 3 секциями)
+        # 1. 智谱开放平台 BigModel API Key 格式
         if "." in token and len(token.split(".")) == 2:
             async for chunk in self._stream_bigmodel_api(token, request, chat_id):
                 yield chunk
             return
 
-        # 2. Иначе работаем через chat.z.ai веб-интерфейс
+        # 2. 网页端 chat.z.ai 接口
         async for chunk in self._stream_web_api(token, request, chat_id):
             yield chunk
 
@@ -222,7 +222,7 @@ class GLMProvider(BaseLLMProvider):
         request: DeepSeekChatRequest,
         chat_id: str,
     ) -> AsyncGenerator[StreamChunk, None]:
-        """Прямой вызов официального BigModel API без капчи."""
+        """直连官方 BigModel API，无验证码。"""
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
@@ -268,7 +268,7 @@ class GLMProvider(BaseLLMProvider):
         request: DeepSeekChatRequest,
         chat_id: str,
     ) -> AsyncGenerator[StreamChunk, None]:
-        """Вызов веб-интерфейса chat.z.ai."""
+        """调用 chat.z.ai 网页接口。"""
         user_id = self._extract_user_id(token)
         now_ms = int(time.time() * 1000)
         req_id = str(uuid.uuid4())
@@ -388,17 +388,17 @@ class GLMProvider(BaseLLMProvider):
                 try:
                     data = json.loads(data_str)
 
-                    # Проверка на капчу в потоке
+                    # 验证码检测
                     if "error" in data or ("data" in data and isinstance(data["data"], dict) and "error" in data["data"]):
                         err_obj = data.get("error") or data["data"].get("error")
                         code = err_obj.get("code") or err_obj.get("error_code")
                         if "CAPTCHA" in str(code):
                             raise HTTPException(
                                 status_code=status.HTTP_403_FORBIDDEN,
-                                detail="Веб-сервер GLM (chat.z.ai) запросил верификацию капчи (CAPTCHA). Для бесплатного использования без капчи используйте API-ключ Zhipu BigModel (модель GLM-4-Flash) через /token glm <api_key>."
+                                detail="GLM 网页端 (chat.z.ai) 触发了人机验证 (CAPTCHA)。建议使用智谱开放平台免费 API-Key (模型 GLM-4-Flash)，通过 /token glm <api_key> 配置。"
                             )
 
-                    # Парсинг SSE контента и мыслей
+                    # 解析 SSE 内容与思考链
                     delta = None
                     if "choices" in data and data["choices"]:
                         delta = data["choices"][0].get("delta", {})
@@ -419,8 +419,8 @@ class GLMProvider(BaseLLMProvider):
         except HTTPException:
             raise
         except Exception as e:
-            logger.error(f"Ошибка вызова GLM: {e}")
-            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Ошибка GLM API: {str(e)}")
+            logger.error(f"调用 GLM 失败: {e}")
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"GLM API 异常: {str(e)}")
 
     async def send_message(
         self,

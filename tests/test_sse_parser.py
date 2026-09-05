@@ -4,21 +4,16 @@ from app.services.sse_parser import SSEParser, parse_sse_stream, parse_sse_lines
 
 @pytest.mark.asyncio
 async def test_sse_parser_user_example():
-    """Тестирует парсер на точном примере SSE потока, предоставленном пользователем."""
+    """测试标准 DeepSeek SSE 流事件解析。"""
     raw_events = [
         b"event: ready\r\ndata: {\"request_message_id\":1,\"response_message_id\":2,\"model_type\":\"expert\"}\r\n\r\n",
         b"event: update_session\r\ndata: {\"updated_at\":1788251660.8037179}\r\n\r\n",
-        b"data: {\"v\":{\"response\":{\"message_id\":2,\"parent_id\":1,\"model\":\"\",\"role\":\"ASSISTANT\",\"thinking_enabled\":false,\"ban_edit\":false,\"ban_regenerate\":false,\"status\":\"WIP\",\"incomplete_message\":null,\"accumulated_token_usage\":0,\"feedback\":null,\"inserted_at\":1788251660.7872858,\"search_enabled\":false,\"fragments\":[{\"id\":2,\"type\":\"RESPONSE\",\"content\":\"\xD0\x9F\xD1\x80\xD0\xB8\",\"references\":[],\"stage_id\":1}],\"conversation_mode\":\"DEFAULT\",\"has_pending_fragment\":false,\"auto_continue\":false,\"search_triggered\":false}}}\r\n\r\n",
-        b"data: {\"p\":\"response/fragments/-1/content\",\"o\":\"APPEND\",\"v\":\"\xD0\xB2\xD0\xB5\xD1\x82\"}\r\n\r\n",
+        b"data: {\"v\":{\"response\":{\"message_id\":2,\"parent_id\":1,\"model\":\"\",\"role\":\"ASSISTANT\",\"thinking_enabled\":false,\"ban_edit\":false,\"ban_regenerate\":false,\"status\":\"WIP\",\"incomplete_message\":null,\"accumulated_token_usage\":0,\"feedback\":null,\"inserted_at\":1788251660.7872858,\"search_enabled\":false,\"fragments\":[{\"id\":2,\"type\":\"RESPONSE\",\"content\":\"Hello\",\"references\":[],\"stage_id\":1}],\"conversation_mode\":\"DEFAULT\",\"has_pending_fragment\":false,\"auto_continue\":false,\"search_triggered\":false}}}\r\n\r\n",
+        b"data: {\"p\":\"response/fragments/-1/content\",\"o\":\"APPEND\",\"v\":\", world\"}\r\n\r\n",
         b"data: {\"v\":\"!\"}\r\n\r\n",
-        b"data: {\"v\":\" \xD0\xA7\"}\r\n\r\n",
-        b"data: {\"v\":\"\xD0\xB5\xD0\xBC\"}\r\n\r\n",
-        b"data: {\"v\":\" \xD0\xBC\xD0\xBE\xD0\xB3\xD1\x83\"}\r\n\r\n",
-        b"data: {\"v\":\" \xD0\xBF\xD0\xBE\xD0\xBC\xD0\xBE\xD1\x87\xD1\x8c\"}\r\n\r\n",
-        b"data: {\"v\":\"?\"}\r\n\r\n",
         b"data: {\"p\":\"response\",\"o\":\"BATCH\",\"v\":[{\"p\":\"accumulated_token_usage\",\"v\":46},{\"p\":\"quasi_status\",\"v\":\"FINISHED\"}]}\r\n\r\n",
         b"data: {\"p\":\"response/status\",\"o\":\"SET\",\"v\":\"FINISHED\"}\r\n\r\n",
-        b"event: title\r\ndata: {\"content\":\"\xD0\x9F\xD1\x80\xD0\xB8\xD0\xB2\xD0\xB5\xD1\x82\xD1\x81\xD1\x82\xD0\xB2\xD0\xB8\xD0\xB5\"}\r\n\r\n",
+        b"event: title\r\ndata: {\"content\":\"Greeting\"}\r\n\r\n",
         b"event: close\r\ndata: {\"click_behavior\":\"none\",\"auto_resume\":false}\r\n\r\n",
     ]
 
@@ -38,7 +33,7 @@ async def test_sse_parser_user_example():
             token_usage = chunk.token_usage
 
     full_text = "".join(collected_content)
-    assert "Привет! Чем могу помочь?" in full_text
+    assert "Hello, world!" in full_text
     assert token_usage == 46
     assert "status" in collected_types
     assert "title" in collected_types
@@ -46,7 +41,7 @@ async def test_sse_parser_user_example():
 
 @pytest.mark.asyncio
 async def test_sse_parser_thinking_and_response():
-    """Тестирует четкое разделение блоков рассуждений и ответа."""
+    """测试思考链与回答正文的清晰分离。"""
     raw_events = [
         b'event: ready\r\ndata: {"request_message_id":1,"response_message_id":2,"model_type":"expert"}\r\n\r\n',
         b'data: {"v":{"response":{"message_id":2,"parent_id":1,"model":"","role":"ASSISTANT","thinking_enabled":true,"fragments":[{"id":1,"type":"THINKING","content":"First thought. "}]}}}\r\n\r\n',
@@ -75,7 +70,7 @@ async def test_sse_parser_thinking_and_response():
 
 @pytest.mark.asyncio
 async def test_sse_parser_batch_fragment_switch():
-    """Тестирует переключение рассуждений на ответ через BATCH операцию."""
+    """测试通过 BATCH 操作从思考链切换为最终正文。"""
     raw_events = [
         b'event: ready\r\ndata: {"request_message_id":1,"response_message_id":2,"model_type":"expert"}\r\n\r\n',
         b'data: {"v":{"response":{"message_id":2,"parent_id":1,"model":"","role":"ASSISTANT","thinking_enabled":true,"fragments":[{"id":1,"type":"THINKING","content":"Thinking..."}]}}}\r\n\r\n',
@@ -103,12 +98,12 @@ async def test_sse_parser_batch_fragment_switch():
 
 @pytest.mark.asyncio
 async def test_sse_parser_real_deepseek_dump():
-    """Тестирует парсер на реальном залогированном ответе от chat.deepseek.com с R1."""
+    """测试真实 DeepSeek-R1 响应数据结构解析。"""
     lines = [
         'event: ready',
         'data: {"request_message_id":1,"response_message_id":2,"model_type":"expert"}',
-        'data: {"v":{"response":{"message_id":2,"parent_id":1,"model":"","role":"ASSISTANT","thinking_enabled":true,"fragments":[{"id":1,"type":"THINKING","content":"Мы должны посчитать 2+2"}]}}}',
-        'data: {"p":"response/fragments/0/content","o":"APPEND","v":". Ответ равен 4."}',
+        'data: {"v":{"response":{"message_id":2,"parent_id":1,"model":"","role":"ASSISTANT","thinking_enabled":true,"fragments":[{"id":1,"type":"THINKING","content":"We calculate 2+2"}]}}}',
+        'data: {"p":"response/fragments/0/content","o":"APPEND","v":". The answer is 4."}',
         'data: {"p":"response","o":"BATCH","v":[{"p":"fragments/0/status","o":"SET","v":"FINISHED"},{"p":"fragments","o":"APPEND","v":{"id":2,"type":"RESPONSE","content":"4"}}]}',
         'data: {"p":"response/status","o":"SET","v":"FINISHED"}',
         'event: close',
@@ -129,18 +124,18 @@ async def test_sse_parser_real_deepseek_dump():
 
     th = "".join(thinking)
     ct = "".join(content)
-    assert "Мы должны" in th
+    assert "We calculate" in th
     assert ct == "4"
 
 
 @pytest.mark.asyncio
 async def test_sse_parser_hint_error():
-    """Тестирует распознавание серверных ошибок DeepSeek в событии hint."""
+    """测试服务端 hint 报错检测。"""
     lines = [
         'event: ready',
         'data: {"request_message_id":1,"response_message_id":2,"model_type":"expert"}',
         'event: hint',
-        'data: {"type":"error","content":"Вы ввели слишком длинный текст. Сократите его.","clear_response":true,"finish_reason":"input_exceeds_limit"}',
+        'data: {"type":"error","content":"Text too long. Please shorten it.","clear_response":true,"finish_reason":"input_exceeds_limit"}',
         'event: close',
         'data: {"click_behavior":"none","auto_resume":false}',
     ]
@@ -155,4 +150,4 @@ async def test_sse_parser_hint_error():
 
     error_chunks = [c for c in chunks if c.type == "error"]
     assert len(error_chunks) == 1
-    assert "input_exceeds_limit" in error_chunks[0].text or "слишком длинный" in error_chunks[0].text
+    assert "input_exceeds_limit" in error_chunks[0].text or "Text too long" in error_chunks[0].text

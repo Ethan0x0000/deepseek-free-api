@@ -9,11 +9,11 @@ def test_estimate_tokens():
     tokens_ascii = estimate_tokens(ascii_text)
     assert tokens_ascii > 0
 
-    # Cyrillic text
-    cyrillic_text = "Привет мир! Это тестовая строка на русском языке."
-    tokens_cyr = estimate_tokens(cyrillic_text)
-    assert tokens_cyr > 0
-    assert tokens_cyr > len(cyrillic_text) / 2.5
+    # CJK / Multi-language text
+    cjk_text = "你好世界！这是一段中文测试文本。"
+    tokens_cjk = estimate_tokens(cjk_text)
+    assert tokens_cjk > 0
+    assert tokens_cjk > len(cjk_text) / 2.5
 
 
 def test_truncate_tool_output():
@@ -23,7 +23,7 @@ def test_truncate_tool_output():
     huge_output = "A" * 50_000
     truncated = truncate_tool_output(huge_output, max_tokens=500)
     assert len(truncated) < len(huge_output)
-    assert "Контекстный компрессор" in truncated
+    assert "Context compressed" in truncated
 
 
 def test_compress_openai_messages():
@@ -31,7 +31,7 @@ def test_compress_openai_messages():
 
     system_msg = OpenAIChatMessage(role="system", content="You are a helpful coding assistant.")
     
-    # Создаем длинную историю сообщений
+    # 构建超长历史消息
     messages = [system_msg]
     for i in range(20):
         messages.append(OpenAIChatMessage(role="user", content=f"User message number {i} " + "content " * 20))
@@ -39,14 +39,14 @@ def test_compress_openai_messages():
 
     compressed = compressor.compress_openai_messages(messages, max_tokens=300)
 
-    # 1. Системный промпт сохранен
+    # 1. 系统提示词完整保留
     assert compressed[0].role == "system"
     assert compressed[0].content == system_msg.content
 
-    # 2. Появилась сводка
-    assert any("Сводка предыдущего контекста диалога" in (m.content or "") for m in compressed)
+    # 2. 中间历史生成摘要
+    assert any("Summary of previous conversation context" in (m.content or "") for m in compressed)
 
-    # 3. Последние 2 сообщения сохранены без изменений
+    # 3. 最近两条消息完整保留
     assert compressed[-1].content == messages[-1].content
     assert compressed[-2].content == messages[-2].content
 
@@ -59,13 +59,13 @@ def test_compress_raw_prompt():
     huge_prompt = "Header instructions:\n" + ("Data line details\n" * 500) + "\nFinal task: summarize everything."
     compressed = compressor.compress_raw_prompt(huge_prompt, max_tokens=50)
 
-    assert "Интеллектуальное сжатие контекста" in compressed
+    assert "Context compressed" in compressed
     assert "Header instructions" in compressed
     assert "Final task" in compressed
 
 
 def test_compress_raw_prompt_preserves_tools_and_instructions():
-    """Проверяет, что при сжатии промпта с историей диалога блок инструментов и инструкции остаются нетронутыми."""
+    """验证压缩对话历史时，工具定义与系统指令始终保持不被裁剪。"""
     compressor = ContextCompressor()
 
     tools_block = "# Available Tools\n```json\n" + ("x" * 20_000) + "\n```\n\n# Tool Call Instructions\nCRITICAL REQUIREMENT: invoke tool using <tool_call>.\n"
@@ -76,15 +76,15 @@ def test_compress_raw_prompt_preserves_tools_and_instructions():
 
     compressed = compressor.compress_raw_prompt(full_prompt, max_tokens=20_000, max_bytes=70_000)
 
-    # 1. Инструкции по вызову инструментов полностью сохранены
+    # 1. 工具指令完整保留
     assert "# Tool Call Instructions" in compressed
     assert "CRITICAL REQUIREMENT: invoke tool using <tool_call>." in compressed
     assert "```\n\n# Tool Call Instructions" in compressed
     assert "System Instructions:\nYou are ZCode assistant." in compressed
 
-    # 2. Сжатие произошло только внутри истории
+    # 2. 压缩仅在对话历史区间发生
     assert "Conversation History:" in compressed
-    assert "⚡ Интеллектуальное сжатие контекста" in compressed
+    assert "Context compressed" in compressed
 
-    # 3. Итоговый размер безопасен для веб-WAF Qwen (< 70 KB)
+    # 3. 最终体积在安全限制内 (< 70 KB)
     assert len(compressed.encode("utf-8")) <= 70_000

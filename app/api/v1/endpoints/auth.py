@@ -1,74 +1,71 @@
-from typing import Dict, Any, Optional
-from pydantic import BaseModel, Field
+from typing import Any, Dict, Optional
 from fastapi import APIRouter, HTTPException, status
+from pydantic import BaseModel, Field
+
 from app.core.credentials import credentials_manager
+from app.services.browser_auth import browser_auth_service
 
 router = APIRouter(prefix="/api/v1/auth", tags=["Auth"])
 
 
-class TokenSetRequest(BaseModel):
-    token: str = Field(..., min_length=5, description="Bearer токен из браузера или API")
-    provider: Optional[str] = Field(default="deepseek", description="Провайдер: deepseek, qwen")
+class TokenRequest(BaseModel):
+    token: str = Field(..., min_length=5, description="从浏览器提取的 Bearer Token 或 API Key")
+    provider: Optional[str] = Field(default="deepseek", description="提供商: deepseek, qwen")
 
 
-@router.post("/token", summary="Сохранить токен авторизации для указанного провайдера")
-async def set_auth_token(request: TokenSetRequest) -> Dict[str, Any]:
-    prov = (request.provider or "deepseek").lower().strip()
+@router.post("/token", summary="保存指定提供商的认证 Token")
+async def set_auth_token(req: TokenRequest) -> Dict[str, Any]:
+    prov = (req.provider or "deepseek").lower().strip()
     try:
-        credentials_manager.save(request.token, provider=prov)
+        credentials_manager.save_token(req.token, provider=prov)
         return {
             "status": "success",
             "provider": prov,
-            "message": f"Токен для провайдера '{prov}' успешно сохранен и активирован",
-            "authenticated": True,
+            "message": f"提供商 '{prov}' 的 Token 保存并激活成功",
+            "token_preview": f"{req.token[:6]}...{req.token[-4:]}" if len(req.token) > 10 else "***",
         }
     except Exception as e:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Не удалось сохранить токен для {prov}: {str(e)}"
+            detail=f"保存提供商 {prov} 的 Token 失败: {str(e)}"
         )
 
 
-@router.post("/browser-login", summary="Запустить системный браузер и автоматически перехватить токен")
-async def browser_login(provider: Optional[str] = "deepseek", timeout: int = 120) -> Dict[str, Any]:
+@router.post("/browser-login", summary="启动系统浏览器并自动捕获 Token")
+async def browser_login(provider: Optional[str] = "deepseek") -> Dict[str, Any]:
     prov = (provider or "deepseek").lower().strip()
+
     if prov not in ["deepseek", "qwen"]:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Поддерживаются только провайдеры 'deepseek' и 'qwen'"
+            detail="当前仅支持 'deepseek' 与 'qwen' 提供商"
         )
 
-    from app.services.browser_auth import extract_token_via_browser
-    token = await extract_token_via_browser(provider=prov, headless=False, timeout_seconds=timeout)
-    if token:
-        return {
-            "status": "success",
-            "provider": prov,
-            "message": f"Токен для {prov} успешно получен через браузер и сохранен!",
-            "authenticated": True,
-        }
-    else:
+    try:
+        token = await browser_auth_service.login_and_capture_token(provider=prov)
+        if token:
+            credentials_manager.save_token(token, provider=prov)
+            return {
+                "status": "success",
+                "provider": prov,
+                "message": f"通过浏览器成功获取并保存了 {prov} 的 Token！",
+                "token_preview": f"{token[:6]}...{token[-4:]}",
+            }
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_408_REQUEST_TIMEOUT,
+                detail=f"获取 {prov} Token 失败 (超时或浏览器窗口已关闭)"
+            )
+    except Exception as e:
         raise HTTPException(
-            status_code=status.HTTP_408_REQUEST_TIMEOUT,
-            detail=f"Не удалось извлечь токен для {prov} (таймаут или окно браузера было закрыто)"
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=str(e)
         )
 
 
-@router.get("/status", summary="Проверить статус авторизации всех провайдеров")
+@router.get("/status", summary="查看所有提供商的认证状态")
 async def get_auth_status() -> Dict[str, Any]:
-    tokens = credentials_manager.load()
-    providers_status = {}
-
-    for p in ["deepseek", "qwen"]:
-        t = tokens.get(p)
-        is_auth = bool(t)
-        masked = (t[:6] + "..." + t[-4:]) if (is_auth and len(t) > 10) else ("***" if is_auth else None)
-        providers_status[p] = {
-            "authenticated": is_auth,
-            "token_preview": masked,
-        }
-
     return {
-        "authenticated": any(ps["authenticated"] for ps in providers_status.values()),
-        "providers": providers_status,
+        "authenticated": credentials_manager.is_authenticated(),
+        "providers": credentials_manager.get_all_status(),
     }

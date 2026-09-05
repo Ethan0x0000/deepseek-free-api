@@ -24,30 +24,27 @@ from app.services.tool_parser import extract_tool_calls
 router = APIRouter(tags=["Anthropic"])
 
 
-@router.post("/v1/messages", summary="Anthropic Messages API эндпоинт (/v1/messages с мульти-провайдерами)")
-@router.post("/api/v1/messages", summary="Anthropic Messages API эндпоинт (/api/v1/messages с мульти-провайдерами)")
+@router.post("/v1/messages", summary="Anthropic Messages API 兼容端点")
+@router.post("/api/v1/messages", summary="Anthropic Messages API 兼容端点")
 async def anthropic_messages(
     request: AnthropicMessagesRequest,
     raw_req: Request,
     client: Annotated[httpx.AsyncClient, Depends(get_http_client)],
 ):
     """
-    Эндпоинт, совместимый со спецификацией Anthropic Messages API.
-    Автоматически маршрутизирует модели:
-    - deepseek-v4-pro, claude-* -> DeepSeek
-    - qwen3.7-plus, qwen-3.8, qwen-3.8-coder -> Qwen
-    - Полноценная поддержка Tool Use и Thinking
+    兼容 Anthropic Claude Messages API 规范 (/v1/messages)。
+    自动根据模型路由，并支持完整的 Tool Use 与 Thinking 推理链。
     """
     if not request.messages:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Поле messages обязательно и не может быть пустым."
+            detail="messages 字段为必填项且不能为空"
         )
 
     provider = provider_registry.resolve_provider_for_model(request.model)
     deepseek_req, has_tools = convert_anthropic_request_to_deepseek(request)
 
-    # Обработка изображений (Vision Multimodal): извлечение, PoW загрузка и fork в Vision
+    # 图像多模态处理 (Vision Multimodal): 提取图片、计算 PoW、上传并 fork 给 Vision 模型
     from app.services.image_manager import image_manager
     vision_file_ids = await image_manager.process_images(client, request.messages)
     if vision_file_ids:
@@ -63,7 +60,7 @@ async def anthropic_messages(
             deepseek_req.prompt, max_tokens=provider_token_limit
         )
 
-    # Точный расчет токенов ввода и кэшированного контекста (Prompt Caching)
+    # 精确计算输入与缓存 Token 数量 (Prompt Caching)
     prompt_tokens = estimate_tokens(deepseek_req.prompt or "")
     if len(request.messages) > 1:
         try:
@@ -99,7 +96,7 @@ async def anthropic_messages(
         client_ip=client_ip,
     )
 
-    # --- 1. Потоковый режим (Anthropic SSE Streaming) ---
+    # ── 1. 流式模式 (Anthropic SSE Streaming) ───────────────────────────
     if request.stream:
         async def anthropic_sse_generator() -> AsyncGenerator[str, None]:
             msg_id = f"msg_{uuid.uuid4().hex[:24]}"
@@ -111,6 +108,8 @@ async def anthropic_messages(
             accumulated_thinking = []
             has_tools = bool(request.tools)
             active_provider = provider
+            active_session_id: Optional[str] = None
+            latest_token_usage: Optional[int] = None
 
             def emit_start():
                 nonlocal message_started
@@ -147,7 +146,10 @@ async def anthropic_messages(
                     if chunk.token_usage is not None:
                         latest_token_usage = chunk.token_usage
 
-                    # Блок рассуждений (Thinking)
+                    if chunk.session_id:
+                        active_session_id = chunk.session_id
+
+                    # 思考链 (Thinking)
                     if chunk.type == "thinking":
                         proxy_logger.log_thinking_chunk(log_id, chunk.text)
                         accumulated_thinking.append(chunk.text)
@@ -172,7 +174,7 @@ async def anthropic_messages(
                             }
                             yield f"event: content_block_delta\ndata: {json.dumps(cb_delta, ensure_ascii=False)}\n\n"
 
-                    # Блок текста ответа (Content)
+                    # 文本内容 (Content)
                     elif chunk.type == "content":
                         accumulated_content.append(chunk.text)
                         if not has_tools:
@@ -212,7 +214,7 @@ async def anthropic_messages(
                 stop_reason = "end_turn"
                 full_text = "".join(accumulated_content)
 
-                # Если были запрошены инструменты, проверяем наличие tool_calls
+                # 工具调用解析
                 if has_tools:
                     clean_text, tool_calls = extract_tool_calls(full_text)
                     if tool_calls:
@@ -318,6 +320,12 @@ async def anthropic_messages(
                 # message_stop
                 yield "event: message_stop\ndata: {\"type\": \"message_stop\"}\n\n"
                 proxy_logger.log_request_end(log_id, status_code=200, tokens_out=completion_tokens)
+
+                # 后台静默回收网页端临时会话
+                if settings.AUTO_CLEAN_WEB_SESSIONS and not (request.chat_session_id or request.session_id):
+                    clean_sid = active_session_id or session_manager.get_current_session_id()
+                    if clean_sid:
+                        asyncio.create_task(session_manager.delete_session(client, clean_sid))
             except Exception as e:
                 try:
                     active_provider.reset_session()
@@ -335,6 +343,11 @@ async def anthropic_messages(
                 }
                 yield f"event: error\ndata: {json.dumps(err_event, ensure_ascii=False)}\n\n"
 
+                if settings.AUTO_CLEAN_WEB_SESSIONS and not (request.chat_session_id or request.session_id):
+                    clean_sid = active_session_id or session_manager.get_current_session_id()
+                    if clean_sid:
+                        asyncio.create_task(session_manager.delete_session(client, clean_sid))
+
         return StreamingResponse(
             anthropic_sse_generator(),
             media_type="text/event-stream",
@@ -345,7 +358,7 @@ async def anthropic_messages(
             },
         )
 
-    # --- 2. Синхронный режим (Non-streaming) ---
+    # ── 2. 同步非流式模式 (Non-streaming) ──────────────────────────────────
     else:
         try:
             resp = await provider.send_message(deepseek_req)
@@ -358,6 +371,13 @@ async def anthropic_messages(
                 cached_tokens=cached_tokens,
             )
             proxy_logger.log_request_end(log_id, status_code=200, tokens_out=resp.token_usage or 0)
+
+            # 后台静默回收网页端临时会话
+            if settings.AUTO_CLEAN_WEB_SESSIONS and not (request.chat_session_id or request.session_id):
+                clean_sid = getattr(resp, "session_id", None) or session_manager.get_current_session_id()
+                if clean_sid:
+                    asyncio.create_task(session_manager.delete_session(client, clean_sid))
+
             return result
         except Exception as e:
             proxy_logger.log_request_end(log_id, status_code=500, error=str(e))

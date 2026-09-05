@@ -14,7 +14,7 @@ async def test_session_manager_single_session_mode():
 
     mock_client = AsyncMock(spec=httpx.AsyncClient)
 
-    # 1. Первый вызов создает новую сессию
+    # 1. 首次调用创建新会话
     with patch.object(mgr, "create_new_session", new_callable=AsyncMock) as mock_create:
         mock_create.return_value = "session-123"
         mgr._current_session_id = None
@@ -24,17 +24,17 @@ async def test_session_manager_single_session_mode():
         mgr._current_session_id = "session-123"
         assert mock_create.call_count == 1
 
-    # 2. Второй вызов в single_session_mode НЕ создает сессию, а возвращает текущую
+    # 2. 单会话模式下第二次调用复用当前会话，不创建新会话
     with patch.object(mgr, "create_new_session", new_callable=AsyncMock) as mock_create:
         sid2 = await mgr.get_or_create_session(mock_client)
         assert sid2 == "session-123"
         mock_create.assert_not_called()
 
-    # 3. Инвалидация сессии
+    # 3. 显式废弃会话
     mgr.invalidate_current_session()
     assert mgr.get_current_session_id() is None
 
-    # 4. После инвалидации снова создается новая сессия
+    # 4. 废弃后重新创建新会话
     with patch.object(mgr, "create_new_session", new_callable=AsyncMock) as mock_create:
         mock_create.return_value = "session-456"
         sid3 = await mgr.get_or_create_session(mock_client)
@@ -75,7 +75,7 @@ async def test_qwen_provider_single_session_mode():
         assert cid == "qwen-chat-123"
         mock_create.assert_not_called()
 
-    # В multi режиме создает новый чат
+    # multi 模式下创建新会话
     session_manager.set_single_session_mode(False)
     with patch.object(provider, "_create_new_chat", new_callable=AsyncMock) as mock_create:
         mock_create.return_value = "qwen-chat-new"
