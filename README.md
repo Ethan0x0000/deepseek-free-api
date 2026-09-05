@@ -88,7 +88,7 @@ services:
       DEBUG: "false"
       REQUEST_TIMEOUT: "180.0"
       PROXY_MODE: "multi"
-      AUTO_CLEAN_WEB_SESSIONS: "true"
+      AUTO_CLEAN_WEB_SESSIONS: "false"
       MAX_CONTEXT_TOKENS: "300000"
 ```
 
@@ -189,7 +189,7 @@ curl -X POST http://127.0.0.1:8317/api/v1/auth/token \
 | `PORT` | `8317` | 监听端口 |
 | `REQUEST_TIMEOUT` | `180.0` | 上游网络请求超时时间 (秒) |
 | `PROXY_MODE` | `multi` | 会话隔离模式 (`multi` 每请求独立临时会话 / `single` 单会话) |
-| `AUTO_CLEAN_WEB_SESSIONS` | `true` | 请求完成后是否在后台静默删除网页端临时会话 |
+| `AUTO_CLEAN_WEB_SESSIONS` | `false` | 请求完成后是否在后台静默删除网页端临时会话（默认关闭，完整保留网页端会话） |
 | `MAX_CONTEXT_TOKENS` | `300000` | 触发自适应上下文压缩的安全阈值 |
 | `MAX_TOOL_OUTPUT_TOKENS` | `25000` | 单个工具执行结果截断上限 |
 

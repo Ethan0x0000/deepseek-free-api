@@ -54,8 +54,8 @@ class Settings(BaseSettings):
         description="是否在单会话内持续累积消息 (非 Agent 编程场景使用)"
     )
     AUTO_CLEAN_WEB_SESSIONS: bool = Field(
-        default=True,
-        description="请求结束后是否在后台自动删除网页端的临时会话，保持网页左侧对话列表干净整洁"
+        default=False,
+        description="是否在后台自动删除网页端的临时会话（默认关闭，完整保留网页端会话记录，避免高频秒删触发官方反爬风控）"
     )
 
 

@@ -74,8 +74,14 @@ async def test_tool_parser_extraction():
 
 
 @pytest.mark.asyncio
-async def test_auth_token_set(monkeypatch):
-    original_token = credentials_manager.token
+async def test_auth_token_set(monkeypatch, tmp_path):
+    fake_proj = tmp_path / "credentials.json"
+    fake_user = tmp_path / "user_credentials.json"
+    fake_env = tmp_path / ".env"
+    monkeypatch.setattr(credentials_manager, "project_file", fake_proj)
+    monkeypatch.setattr(credentials_manager, "user_file", fake_user)
+    monkeypatch.setattr(credentials_manager, "env_file", fake_env)
+
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
         test_token = "test_temporary_token_1234567890"
         resp = await ac.post("/api/v1/auth/token", json={"token": test_token})
@@ -85,6 +91,3 @@ async def test_auth_token_set(monkeypatch):
         status_resp = await ac.get("/api/v1/auth/status")
         assert status_resp.status_code == 200
         assert status_resp.json()["authenticated"] is True
-
-    if original_token:
-        credentials_manager.save(original_token)
