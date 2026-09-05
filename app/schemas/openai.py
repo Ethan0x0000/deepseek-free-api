@@ -51,6 +51,7 @@ class OpenAIChatCompletionRequest(BaseModel):
     thinking_enabled: Optional[bool] = None
     thinking: Optional[Union[bool, Dict[str, Any]]] = None
     search_enabled: Optional[bool] = None
+    stream_options: Optional[Dict[str, Any]] = None
 
 
 class OpenAIChoiceMessage(BaseModel):
@@ -66,10 +67,24 @@ class OpenAIChoice(BaseModel):
     finish_reason: Optional[str] = "stop"  # "stop", "tool_calls", "length"
 
 
+class OpenAIPromptTokensDetails(BaseModel):
+    cached_tokens: int = 0
+    audio_tokens: int = 0
+
+
+class OpenAICompletionTokensDetails(BaseModel):
+    reasoning_tokens: int = 0
+    audio_tokens: int = 0
+    accepted_prediction_tokens: int = 0
+    rejected_prediction_tokens: int = 0
+
+
 class OpenAIUsage(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: int = 0
     total_tokens: int = 0
+    prompt_tokens_details: Optional[OpenAIPromptTokensDetails] = None
+    completion_tokens_details: Optional[OpenAICompletionTokensDetails] = None
 
 
 class OpenAIChatCompletionResponse(BaseModel):
@@ -113,4 +128,5 @@ class OpenAIChatCompletionChunk(BaseModel):
     object: str = "chat.completion.chunk"
     created: int = Field(default_factory=lambda: int(time.time()))
     model: str
-    choices: List[OpenAIChunkChoice]
+    choices: List[OpenAIChunkChoice] = Field(default_factory=list)
+    usage: Optional[OpenAIUsage] = None

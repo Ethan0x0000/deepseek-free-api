@@ -30,9 +30,9 @@ class Settings(BaseSettings):
     # Client emulation headers
     CLIENT_BUNDLE_ID: str = "com.deepseek.chat"
     CLIENT_VERSION: str = "2.4.0"
-    CLIENT_LOCALE: str = "ru"
+    CLIENT_LOCALE: str = "zh-CN"
     CLIENT_PLATFORM: str = "web"
-    CLIENT_TIMEZONE_OFFSET: str = "10800"
+    CLIENT_TIMEZONE_OFFSET: str = "28800"  # UTC+8 (Asia/Shanghai)
     USER_AGENT: str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36"
     
     # Request timeouts
@@ -46,11 +46,11 @@ class Settings(BaseSettings):
 
     # Proxy Session Mode ('single' or 'multi')
     PROXY_MODE: str = Field(
-        default="single",
+        default="multi",
         description="Режим работы сессий: 'single' (единая сессия без создания новых чатов) или 'multi' (новый чат на запрос)"
     )
     SINGLE_SESSION_MODE: bool = Field(
-        default=True,
+        default=False,
         description="Работать в рамках одной постоянной сессии, предотвращая частые вызовы chat_session/create и ошибку 429"
     )
 

@@ -13,9 +13,9 @@ def estimate_tokens(text: Union[str, Any]) -> int:
     """
     Быстрая и точная оценка количества токенов для многоязычного текста, кода и JSON.
     Учитывает:
-    - Английский текст и код: ~3.8 символа на токен
+    - Английский текст и код: ~3.6 символа на токен
     - Кириллица / Русский: ~1.8 символа на токен
-    - Китайские иероглифы (CJK): ~1.2 символа на токен
+    - Китайские иероглифы (CJK): ~1.3-1.4 символа на токен
     - Пробелы и спецсимволы
     """
     if not text:
@@ -31,8 +31,8 @@ def estimate_tokens(text: Union[str, Any]) -> int:
     non_ascii_count = sum(1 for c in text if ord(c) > 127)
     ascii_count = length - non_ascii_count
 
-    # Оценка: ASCII ~ 3.8 символов/токен, Non-ASCII ~ 1.8 символов/токен
-    tokens = int((ascii_count / 3.8) + (non_ascii_count / 1.8))
+    # Оценка: ASCII ~ 3.6 символов/токен, Non-ASCII (CJK/Кириллица) ~ 1.4 символов/токен
+    tokens = int((ascii_count / 3.6) + (non_ascii_count / 1.4))
     return max(1, tokens)
 
 
@@ -73,9 +73,9 @@ class ContextCompressor:
 
     QWEN_MAX_WEB_TOKENS: int = 20_000
     QWEN_MAX_PAYLOAD_BYTES: int = 70_000
-    DEEPSEEK_MAX_WEB_TOKENS: int = 32_000
-    DEEPSEEK_MAX_PAYLOAD_BYTES: int = 140_000
-    DEFAULT_MAX_TOKENS: int = 32_000
+    DEEPSEEK_MAX_WEB_TOKENS: int = 100_000
+    DEEPSEEK_MAX_PAYLOAD_BYTES: int = 380_000
+    DEFAULT_MAX_TOKENS: int = 64_000
 
     def __init__(
         self,
@@ -83,7 +83,7 @@ class ContextCompressor:
         retain_recent_count: Optional[int] = None,
         max_tool_tokens: Optional[int] = None,
     ):
-        self.max_context_tokens = max_context_tokens or getattr(settings, "MAX_CONTEXT_TOKENS", 32_000)
+        self.max_context_tokens = max_context_tokens or getattr(settings, "MAX_CONTEXT_TOKENS", 100_000)
         self.retain_recent_count = retain_recent_count or getattr(settings, "RETAIN_RECENT_MESSAGES_COUNT", 12)
         self.max_tool_tokens = max_tool_tokens or getattr(settings, "MAX_TOOL_OUTPUT_TOKENS", 25_000)
 
@@ -93,7 +93,7 @@ class ContextCompressor:
         if pid == "qwen":
             return self.QWEN_MAX_WEB_TOKENS
         elif pid == "deepseek":
-            return self.DEEPSEEK_MAX_WEB_TOKENS
+            return min(self.max_context_tokens, self.DEEPSEEK_MAX_WEB_TOKENS)
         return self.max_context_tokens
 
     def compress_openai_messages(
@@ -152,7 +152,7 @@ class ContextCompressor:
             summary_lines.append(f"- [{role}]: {c}")
 
         summary_text = (
-            f"[Сводка предыдущего контекста диалога ({len(middle_msgs)} ранних сообщений сжато для оптимизации памяти)]:\n"
+            f"[Summary of previous conversation context ({len(middle_msgs)} earlier messages compressed)]:\n"
             + "\n".join(summary_lines)
         )
 
@@ -224,8 +224,8 @@ class ContextCompressor:
                         omitted_tokens = int(omitted / 3.2)
                         return (
                             f"{header_with_marker}{h_head}\n\n"
-                            f"[... ⚡ Интеллектуальное сжатие контекста: сжато {omitted:,} символов (~{omitted_tokens:,} токенов) "
-                            f"промежуточных логов и истории для удержания фокуса модели в пределах {limit:,} токенов ...]\n\n"
+                            f"[... Context compressed: omitted {omitted:,} characters (~{omitted_tokens:,} tokens) "
+                            f"of intermediate history to keep model focus within {limit:,} tokens ...]\n\n"
                             f"{h_tail}"
                         )
 
@@ -243,8 +243,8 @@ class ContextCompressor:
 
         compressed = (
             f"{head}\n\n"
-            f"[... ⚡ Интеллектуальное сжатие контекста: сжато {omitted_chars:,} символов (~{omitted_tokens:,} токенов) "
-            f"промежуточных логов и истории для удержания фокуса модели в пределах {limit:,} токенов ...]\n\n"
+            f"[... Context compressed: omitted {omitted_chars:,} characters (~{omitted_tokens:,} tokens) "
+            f"of intermediate history to keep model focus within {limit:,} tokens ...]\n\n"
             f"{tail}"
         )
         return compressed

@@ -41,3 +41,4 @@ htmlcov/
 .idea/
 .vscode/
 *.swp
+.playwright-cli/

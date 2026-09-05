@@ -43,7 +43,7 @@ You have access to the following functions/tools to assist the user:
 # Tool Call Instructions
 CRITICAL RULES FOR TOOL CALLS:
 1. You ONLY REASON and REQUEST tool executions. You do NOT execute any commands or files yourself.
-2. DO NOT STOP with just a text promise or declaration of intent (such as "Изучу файлы...", "I will check...", "Let me read..."). When you need to inspect, read, search, edit, or run something, you MUST output the tool call in the SAME response!
+2. DO NOT STOP with just a text promise or declaration of intent (such as "I will check...", "Let me read..."). When you need to inspect, read, search, edit, or run something, you MUST output the tool call in the SAME response!
 3. NEVER simulate, guess, or fabricate command or tool output — output the tool call and wait for the actual result from the system.
 4. When requesting a tool, output valid JSON inside `<tool_call>...</tool_call>`:
 <tool_call>
@@ -172,6 +172,8 @@ def convert_deepseek_response_to_anthropic(
     resp: DeepSeekChatResponse,
     model: str,
     has_tools: bool = False,
+    input_tokens: int = 0,
+    cached_tokens: int = 0,
 ) -> AnthropicMessagesResponse:
     """Преобразует синхронный ответ DeepSeek в AnthropicMessagesResponse."""
     content_blocks: List[AnthropicContentBlock] = []
@@ -217,7 +219,8 @@ def convert_deepseek_response_to_anthropic(
         content=content_blocks,
         stop_reason=stop_reason,
         usage=AnthropicUsage(
-            input_tokens=0,
+            input_tokens=input_tokens,
             output_tokens=resp.token_usage or 0,
+            cache_read_input_tokens=cached_tokens,
         ),
     )

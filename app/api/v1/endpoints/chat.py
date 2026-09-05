@@ -1,3 +1,4 @@
+import asyncio
 import json
 import logging
 import re
@@ -26,6 +27,8 @@ from app.schemas.openai import (
     OpenAIDeltaToolCallFunction,
     OpenAIToolCall,
     OpenAIUsage,
+    OpenAIPromptTokensDetails,
+    OpenAICompletionTokensDetails,
 )
 from app.services.tool_parser import extract_tool_calls, format_messages_to_prompt
 
@@ -36,10 +39,22 @@ INTENT_PAT = re.compile(
     r'нужно\s+(?:изучить|посмотреть|проверить|исследовать|открыть|понять)|'
     r'let\s+me\s+(?:study|examine|investigate|analyze|review|search|scan|see|find|check|read|explore|inspect|run|look|implement)|'
     r'i\s*(?:will|\'ll|\s+need\s+to)\s+(?:study|examine|investigate|analyze|review|search|scan|see|find|check|read|explore|inspect|run|look|understand|implement)|'
-    r'(?:next|first|now),?\s+(?:i\s+will|let\s+me)'
+    r'(?:next|first|now),?\s+(?:i\s+will|let\s+me)|'
+    # 中文意图模式 (Chinese action intent patterns)
+    r'我(?:来|将|会|准备)?(?:看看|看下|查看|检查|分析|读取|看一下|跑一下|运行|执行|探索|搜索|检索|浏览|找找|列出|了解|排查|确认|扫描|定位|统计)|'
+    r'让我(?:来|先)?(?:看看|看下|查看|检查|分析|读取|看一下|跑一下|运行|执行|探索|搜索|检索|浏览|找找|列出|了解|排查|确认|扫描|定位|统计)|'
+    r'我们(?:需要|先)?(?:看看|看下|查看|检查|分析|读取|看一下|跑一下|运行|执行|探索|搜索|检索|浏览|找找|列出|了解|排查|确认|扫描|定位|统计)|'
+    r'先(?:看看|看下|查看|检查|分析|读取|看一下|跑一下|运行|执行|探索|搜索|检索|浏览|找找|列出|排查|确认)|'
+    r'接下来(?:我将|让我|我来|我们会|先)|'
+    r'帮(?:你|您)(?:查看|检查|分析|读取|列出|搜索|排查)|'
+    r'现在(?:我来|让我|我们)'
     r')'
-    r'[^.!?\n]{0,120}'
-    r'(?:файл|код|проект|директори|папк|api|структур|конфиг|скрипт|репозитори|file|code|dir|repo|output|struct|backend|frontend|project|folder|plan|service|parser)',
+    r'(?:(?![。！？\n]|\.\s).){0,120}'
+    r'(?:'
+    r'файл|код|проект|директори|папк|api|структур|конфиг|скрипт|репозитори|'
+    r'file|code|dir|repo|output|struct|backend|frontend|project|folder|plan|service|parser|content|log|path|'
+    r'文件|代码|目录|文件夹|内容|结构|项目|依赖|产物|日志|配置|环境|路径|命令|数据|信息'
+    r')',
     re.IGNORECASE,
 )
 
@@ -103,6 +118,14 @@ async def openai_chat_completions(
     # 1. Форматируем все сообщения и инструменты в единый контекстный промпт с учетом лимита провайдера
     provider_token_limit = context_compressor.get_limit_for_provider(provider.provider_id)
     compiled_prompt = format_messages_to_prompt(request.messages, request.tools, max_tokens=provider_token_limit)
+
+    # Точный расчет токенов ввода и кэшированного контекста (Prompt Caching / LCP)
+    prompt_tokens = estimate_tokens(compiled_prompt)
+    if len(request.messages) > 1:
+        prefix_prompt = format_messages_to_prompt(request.messages[:-1], request.tools, max_tokens=provider_token_limit)
+        cached_tokens = min(estimate_tokens(prefix_prompt), max(0, prompt_tokens - 1))
+    else:
+        cached_tokens = 0
 
     # Извлекаем параметр thinking_enabled из запроса (поддерживает boolean, dict и extra_body)
     thinking_val: Optional[bool] = None
@@ -168,40 +191,68 @@ async def openai_chat_completions(
             first_chunk_sent = False
             accumulated_content = []
             accumulated_thinking = []
+            latest_token_usage: Optional[int] = None
             has_tools = bool(request.tools)
             active_provider = provider
+            # Буфер для контента в режиме tools: отдаем текст вживую, но не даем
+            # "утечь" началу XML-тега tool_call (парсим его в конце).
+            pending_tail = ""
+            TOOL_OPEN_PAT = re.compile(r"<[｜\|]*\s*(?:tool_calls?|invoke|DSML)\b", re.IGNORECASE)
+
+            def flush_live_content(text_piece: str) -> str:
+                """Возвращает готовую к отправке часть content-текста.
+
+                Держим только скользящий хвост (до 12 симв.) — он может оказаться
+                началом тега <tool_call>/<invoke>/DSML, который парсится в конце.
+                """
+                nonlocal pending_tail
+                pending_tail += text_piece
+                # Открывающий тег инструмента уже начался — больше ничего не отдаем в поток
+                m = TOOL_OPEN_PAT.search(pending_tail)
+                if m:
+                    safe = pending_tail[: m.start()]
+                    pending_tail = pending_tail[m.start():]
+                    return safe
+                # Нет тега: отдаем все, кроме последних ~12 символов (возможный префикс тега)
+                hold = 12
+                cut = len(pending_tail) - hold if len(pending_tail) > hold else 0
+                safe = pending_tail[:cut]
+                pending_tail = pending_tail[cut:]
+                return safe
 
             try:
                 async for chunk in active_provider.stream_chat(deepseek_req):
                     if chunk.type == "error":
                         raise HTTPException(status_code=400, detail=chunk.text)
 
-                    # Мысли модели (DeepSeek-R1 / Qwen)
+                    if chunk.token_usage is not None:
+                        latest_token_usage = chunk.token_usage
+
+                    # Мысли модели (DeepSeek-R1 / Qwen) — стримим ВСЕГДА, даже с tools,
+                    # т.к. reasoning_content отдельное поле и не конфликтует с tool_calls.
                     if chunk.type == "thinking":
                         proxy_logger.log_thinking_chunk(log_id, chunk.text)
                         accumulated_thinking.append(chunk.text)
-                        # В обычном диалоге без инструментов стримим мысли немедленно
-                        if not has_tools:
-                            if not first_chunk_sent:
-                                first_chunk = OpenAIChatCompletionChunk(
-                                    id=req_id,
-                                    model=request.model,
-                                    choices=[OpenAIChunkChoice(index=0, delta=OpenAIDelta(role="assistant"))],
-                                )
-                                yield f"data: {first_chunk.model_dump_json()}\n\n"
-                                first_chunk_sent = True
-
-                            c = OpenAIChatCompletionChunk(
+                        if not first_chunk_sent:
+                            first_chunk = OpenAIChatCompletionChunk(
                                 id=req_id,
                                 model=request.model,
-                                choices=[OpenAIChunkChoice(index=0, delta=OpenAIDelta(reasoning_content=chunk.text))],
+                                choices=[OpenAIChunkChoice(index=0, delta=OpenAIDelta(role="assistant"))],
                             )
-                            yield f"data: {c.model_dump_json()}\n\n"
+                            yield f"data: {first_chunk.model_dump_json()}\n\n"
+                            first_chunk_sent = True
+
+                        c = OpenAIChatCompletionChunk(
+                            id=req_id,
+                            model=request.model,
+                            choices=[OpenAIChunkChoice(index=0, delta=OpenAIDelta(reasoning_content=chunk.text))],
+                        )
+                        yield f"data: {c.model_dump_json()}\n\n"
 
                     # Основной ответ
                     elif chunk.type == "content":
                         accumulated_content.append(chunk.text)
-                        # В обычном диалоге без инструментов стримим текст немедленно
+                        # Без инструментов — стримим текст немедленно
                         if not has_tools:
                             if not first_chunk_sent:
                                 first_chunk = OpenAIChatCompletionChunk(
@@ -219,6 +270,45 @@ async def openai_chat_completions(
                                 choices=[OpenAIChunkChoice(index=0, delta=OpenAIDelta(content=chunk.text))],
                             )
                             yield f"data: {c.model_dump_json()}\n\n"
+                        else:
+                            # С tools: текст до тега tool_call отдаем вживую (почти без задержки)
+                            safe = flush_live_content(chunk.text)
+                            if safe and not first_chunk_sent:
+                                first_chunk = OpenAIChatCompletionChunk(
+                                    id=req_id,
+                                    model=request.model,
+                                    choices=[OpenAIChunkChoice(index=0, delta=OpenAIDelta(role="assistant"))],
+                                )
+                                yield f"data: {first_chunk.model_dump_json()}\n\n"
+                                first_chunk_sent = True
+                            if safe:
+                                proxy_logger.log_content_chunk(log_id, safe)
+                                c = OpenAIChatCompletionChunk(
+                                    id=req_id,
+                                    model=request.model,
+                                    choices=[OpenAIChunkChoice(index=0, delta=OpenAIDelta(content=safe))],
+                                )
+                                yield f"data: {c.model_dump_json()}\n\n"
+
+                # Остаток буфера (в режиме tools) — это либо хвост обычного текста,
+                # либо начало тега tool_call. Отдаем, если это безопасный текст.
+                if has_tools and pending_tail and not TOOL_OPEN_PAT.search(pending_tail) and "<tool_call" not in pending_tail and "<invoke" not in pending_tail:
+                    if not first_chunk_sent:
+                        first_chunk = OpenAIChatCompletionChunk(
+                            id=req_id,
+                            model=request.model,
+                            choices=[OpenAIChunkChoice(index=0, delta=OpenAIDelta(role="assistant"))],
+                        )
+                        yield f"data: {first_chunk.model_dump_json()}\n\n"
+                        first_chunk_sent = True
+                    proxy_logger.log_content_chunk(log_id, pending_tail)
+                    c = OpenAIChatCompletionChunk(
+                        id=req_id,
+                        model=request.model,
+                        choices=[OpenAIChunkChoice(index=0, delta=OpenAIDelta(content=pending_tail))],
+                    )
+                    yield f"data: {c.model_dump_json()}\n\n"
+                pending_tail = ""
 
                 # Если были запрошены инструменты, проверяем сгенерированный текст на tool_calls
                 finish_reason = "stop"
@@ -227,11 +317,11 @@ async def openai_chat_completions(
                 if has_tools:
                     clean_text, tool_calls = extract_tool_calls(full_text)
 
-                    clean_prefix = re.split(r'<tool_calls?[^>]*>', full_text)[0].strip()
+                    clean_prefix = re.split(r'<[｜\|]*\s*(?:DSML\s*[｜\|]*)?tool_calls?[^>]*>', full_text)[0].strip()
 
                     # Continuation Recovery: если модель заявила о намерении изучить файлы/выполнить код,
                     # или выдала поврежденный/не-JSON тег tool_call, запрашиваем строгое продолжение в JSON
-                    if not tool_calls and (INTENT_PAT.search(full_text) or "<tool_call" in full_text):
+                    if not tool_calls and (INTENT_PAT.search(full_text) or "<tool_call" in full_text or "DSML" in full_text):
                         logger.info("Обнаружено заявление намерения действия или невалидный tool_call. Запуск Continuation Recovery...")
                         try:
                             action_hint = clean_prefix[-150:] if len(clean_prefix) > 150 else clean_prefix
@@ -248,7 +338,8 @@ async def openai_chat_completions(
                                 model=deepseek_req.model,
                                 stream=False,
                             )
-                            cont_resp = await active_provider.send_message(cont_req)
+                            cont_resp = await asyncio.wait_for(active_provider.send_message(cont_req), timeout=15.0)
+                            logger.info(f"Continuation raw content: {cont_resp.content!r}")
                             cont_clean, cont_tools = extract_tool_calls(cont_resp.content)
                             if cont_tools:
                                 tool_calls = cont_tools
@@ -275,58 +366,65 @@ async def openai_chat_completions(
                                 )
                             )
 
-                        # Чанк 1: роль ассистента
-                        first_chunk = OpenAIChatCompletionChunk(
-                            id=req_id,
-                            model=request.model,
-                            choices=[OpenAIChunkChoice(index=0, delta=OpenAIDelta(role="assistant"))],
-                        )
-                        yield f"data: {first_chunk.model_dump_json()}\n\n"
+                        # Чанк 1: роль ассистента (если ещё не отправлена при стриминге рассуждений)
+                        if not first_chunk_sent:
+                            first_chunk = OpenAIChatCompletionChunk(
+                                id=req_id,
+                                model=request.model,
+                                choices=[OpenAIChunkChoice(index=0, delta=OpenAIDelta(role="assistant"))],
+                            )
+                            yield f"data: {first_chunk.model_dump_json()}\n\n"
+                            first_chunk_sent = True
 
-                        # Чанк 2: вызов инструментов с content: None (строгий стандарт OpenAI, не сбивающий ai-sdk)
+                        # Чанк 2: вызов инструментов (строгий формат OpenAI delta с tool_calls)
                         c = OpenAIChatCompletionChunk(
                             id=req_id,
                             model=request.model,
-                            choices=[OpenAIChunkChoice(index=0, delta=OpenAIDelta(content=None, tool_calls=delta_tools))],
+                            choices=[OpenAIChunkChoice(index=0, delta=OpenAIDelta(tool_calls=delta_tools))],
                         )
-                        yield f"data: {c.model_dump_json()}\n\n"
+                        yield f"data: {c.model_dump_json(exclude_none=True)}\n\n"
                     else:
-                        # Если инструментов не обнаружено, отдаем накопленные рассуждения и ответ
-                        first_chunk = OpenAIChatCompletionChunk(
-                            id=req_id,
-                            model=request.model,
-                            choices=[OpenAIChunkChoice(index=0, delta=OpenAIDelta(role="assistant"))],
-                        )
-                        yield f"data: {first_chunk.model_dump_json()}\n\n"
+                        # Инструментов нет — рассуждения и текст уже были отправлены вживую
+                        # во время стриминга, поэтому здесь ничего не дублируем.
+                        pass
 
-                        if accumulated_thinking:
-                            th_text = "".join(accumulated_thinking)
-                            c = OpenAIChatCompletionChunk(
-                                id=req_id,
-                                model=request.model,
-                                choices=[OpenAIChunkChoice(index=0, delta=OpenAIDelta(reasoning_content=th_text))],
-                            )
-                            yield f"data: {c.model_dump_json()}\n\n"
+                # Расчет Token Usage для стриминга (Input, Output, Reasoning, Cached)
+                full_text = "".join(accumulated_content)
+                full_thinking = "".join(accumulated_thinking)
+                reasoning_tokens = estimate_tokens(full_thinking)
 
-                        text_out = clean_text or full_text
-                        if text_out:
-                            proxy_logger.log_content_chunk(log_id, text_out)
-                            c = OpenAIChatCompletionChunk(
-                                id=req_id,
-                                model=request.model,
-                                choices=[OpenAIChunkChoice(index=0, delta=OpenAIDelta(content=text_out))],
-                            )
-                            yield f"data: {c.model_dump_json()}\n\n"
+                if latest_token_usage is not None:
+                    completion_tokens = latest_token_usage
+                else:
+                    completion_tokens = estimate_tokens(full_text) + reasoning_tokens
+
+                usage_obj = OpenAIUsage(
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    total_tokens=prompt_tokens + completion_tokens,
+                    prompt_tokens_details=OpenAIPromptTokensDetails(cached_tokens=cached_tokens),
+                    completion_tokens_details=OpenAICompletionTokensDetails(reasoning_tokens=reasoning_tokens),
+                )
 
                 # Завершающий чанк
                 final_chunk = OpenAIChatCompletionChunk(
                     id=req_id,
                     model=request.model,
                     choices=[OpenAIChunkChoice(index=0, delta=OpenAIDelta(), finish_reason=finish_reason)],
+                    usage=usage_obj,
                 )
-                yield f"data: {final_chunk.model_dump_json()}\n\n"
+                yield f"data: {final_chunk.model_dump_json(exclude_none=True)}\n\n"
+
+                # Дополнительный стандартный чанк usage (OpenAI stream_options format)
+                usage_chunk = OpenAIChatCompletionChunk(
+                    id=req_id,
+                    model=request.model,
+                    choices=[],
+                    usage=usage_obj,
+                )
+                yield f"data: {usage_chunk.model_dump_json(exclude_none=True)}\n\n"
                 yield "data: [DONE]\n\n"
-                proxy_logger.log_request_end(log_id, status_code=200, tokens_out=len(accumulated_content))
+                proxy_logger.log_request_end(log_id, status_code=200, tokens_out=completion_tokens)
 
             except Exception as e:
                 try:
@@ -369,9 +467,9 @@ async def openai_chat_completions(
             if request.tools:
                 clean_text, found_tool_calls = extract_tool_calls(resp.content)
 
-                clean_prefix = re.split(r'<tool_calls?[^>]*>', resp.content)[0].strip()
+                clean_prefix = re.split(r'<[｜\|]*\s*(?:DSML\s*[｜\|]*)?tool_calls?[^>]*>', resp.content)[0].strip()
 
-                if not found_tool_calls and (INTENT_PAT.search(resp.content) or "<tool_call" in resp.content):
+                if not found_tool_calls and (INTENT_PAT.search(resp.content) or "<tool_call" in resp.content or "DSML" in resp.content):
                     logger.info("Non-streaming: обнаружено намерение действия или невалидный tool_call. Запуск Continuation Recovery...")
                     try:
                         action_hint = clean_prefix[-150:] if len(clean_prefix) > 150 else clean_prefix
@@ -388,7 +486,7 @@ async def openai_chat_completions(
                             model=deepseek_req.model,
                             stream=False,
                         )
-                        cont_resp = await provider.send_message(cont_req)
+                        cont_resp = await asyncio.wait_for(provider.send_message(cont_req), timeout=15.0)
                         cont_clean, cont_tools = extract_tool_calls(cont_resp.content)
                         if cont_tools:
                             found_tool_calls = cont_tools
@@ -413,7 +511,21 @@ async def openai_chat_completions(
                 tool_calls=tool_calls,
             )
 
-            proxy_logger.log_request_end(log_id, status_code=200, tokens_out=resp.token_usage or 0)
+            # Расчет Token Usage для синхронного ответа (Input, Output, Reasoning, Cached)
+            reasoning_tokens = estimate_tokens(resp.thinking or "")
+            if resp.token_usage:
+                completion_tokens = resp.token_usage
+            else:
+                completion_tokens = estimate_tokens(resp.content) + reasoning_tokens
+
+            usage_obj = OpenAIUsage(
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                total_tokens=prompt_tokens + completion_tokens,
+                prompt_tokens_details=OpenAIPromptTokensDetails(cached_tokens=cached_tokens),
+                completion_tokens_details=OpenAICompletionTokensDetails(reasoning_tokens=reasoning_tokens),
+            )
+            proxy_logger.log_request_end(log_id, status_code=200, tokens_out=completion_tokens)
 
             return OpenAIChatCompletionResponse(
                 id=req_id,
@@ -425,11 +537,7 @@ async def openai_chat_completions(
                         finish_reason=finish_reason,
                     )
                 ],
-                usage=OpenAIUsage(
-                    prompt_tokens=0,
-                    completion_tokens=resp.token_usage or 0,
-                    total_tokens=resp.token_usage or 0,
-                ),
+                usage=usage_obj,
             )
         except Exception as e:
             proxy_logger.log_request_end(log_id, status_code=500, error=str(e))

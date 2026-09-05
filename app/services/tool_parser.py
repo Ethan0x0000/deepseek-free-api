@@ -69,7 +69,8 @@ You have access to the following functions/tools to assist the user:
 # Tool Call Instructions
 CRITICAL RULES FOR TOOL CALLS:
 1. You ONLY REASON and REQUEST tool executions. You do NOT execute any commands or files yourself.
-2. DO NOT STOP with just a text promise or declaration of intent (such as "Let me study...", "I will check...", "Изучу файлы...", "Let me explore..."). When you need to inspect, read, search, edit, or run something, you MUST output the tool call in the SAME response!
+2. DO NOT STOP with just a text promise or declaration of intent (such as "Let me study...", "I will check...", "我来看看...", "让我检查一下...", "我来读取...").
+   【严格禁令】当需要检查、读取、搜索、编辑文件或运行命令时，严禁仅用自然语言表达行动意向或口头承诺！你必须在【同一条回复中】立即输出 `<tool_call>` 标签调用工具！
 3. NEVER simulate, guess, or fabricate command or tool output — output the tool call and wait for the actual result from the system.
 4. When requesting a tool, output valid JSON inside `<tool_call>...</tool_call>`:
 <tool_call>
@@ -79,16 +80,25 @@ CRITICAL RULES FOR TOOL CALLS:
 Alternatively, standard JSON format is also accepted:
 {{"tool_call": {{"name": "<function_name>", "arguments": {{...}}}}}}
 
-5. EXAMPLE OF CORRECT BEHAVIOR:
+5. EXAMPLES OF CORRECT BEHAVIOR:
+Example 1 (English):
 User: "Explore the codebase"
 Assistant:
 Let me study the files to understand the project structure.
 <tool_call>
-{{"name": "Bash", "arguments": {{"command": "git ls-files || ls -la"}}}}
+{{"name": "shell", "arguments": {{"command": "ls -la"}}}}
 </tool_call>
 
-FORBIDDEN BEHAVIOR (NEVER DO THIS):
-Assistant: "Let me study the remaining backend files and frontend structure." -> WRONG! Never stop without the `<tool_call>` block!
+Example 2 (Chinese):
+User: "当前文件夹中有哪些是生产垃圾"
+Assistant:
+我来查看当前目录下的文件与结构。
+<tool_call>
+{{"name": "shell", "arguments": {{"command": "ls -la"}}}}
+</tool_call>
+
+FORBIDDEN BEHAVIOR (NEVER DO THIS / 严禁只说不调):
+Assistant: "我来看看当前文件夹里有什么内容，帮你识别生产垃圾..." -> WRONG! Never stop without the `<tool_call>` block! Always invoke the tool call immediately!
 
 6. CRITICAL RULES FOR FILE EDITING / WRITING:
 When modifying or editing a file, ALWAYS invoke `Edit` or `Write` with valid JSON arguments!
@@ -178,6 +188,11 @@ def format_messages_to_prompt(
     if compressed_messages and compressed_messages[-1].role in ["tool", "function"]:
         prompt_parts.append(
             "\n[System Directive: The previous tool execution has finished and its output is provided above. Proceed with the task immediately. If you need to inspect more files or run commands, invoke the tool call NOW: <tool_call>{\"name\": \"...\", \"arguments\": {...}}</tool_call>. Do NOT stop with only a conversational promise or intent.]"
+        )
+    # 4. Если переданы tools и последнее сообщение от пользователя, добавляем хвостовую директиву вызова инструментов
+    elif tools and compressed_messages and compressed_messages[-1].role == "user":
+        prompt_parts.append(
+            "\n[System Directive: Tools are available. If you need to inspect files, check directories, read code, or execute commands to answer the user, you MUST invoke the tool call in this turn using `<tool_call>{\"name\": \"...\", \"arguments\": {...}}</tool_call>`. DO NOT stop with only a verbal promise or intent statement like '我来看看...' or 'Let me check...'.]"
         )
 
     full_prompt = "\n\n".join(prompt_parts)
@@ -416,12 +431,12 @@ def extract_tool_calls(text: str) -> Tuple[str, List[OpenAIToolCall]]:
             )
 
     # Очищаем блоки invoke (включая если они обернуты в <tool_call>...<invoke>...</tool_calls>)
-    clean_text = re.sub(r"<tool_calls?[^>]*>\s*(?:<invoke\b.*?</invoke>\s*)+</tool_calls?>", "", clean_text, flags=re.DOTALL)
+    clean_text = re.sub(r"<[｜\|]*\s*(?:DSML\s*[｜\|]*)?tool_calls?[^>]*>\s*(?:<invoke\b.*?</invoke>\s*)+</[｜\|]*\s*(?:DSML\s*[｜\|]*)?tool_calls?>", "", clean_text, flags=re.DOTALL)
     clean_text = re.sub(invoke_pat, "", clean_text, flags=re.DOTALL)
 
     # 2. Паттерны для поиска стандартных блоков JSON tool_call
     patterns = [
-        r"<tool_calls?[^>]*>\s*(.*?)\s*</tool_calls?[^>]*>",
+        r"<[｜\|]*\s*(?:DSML\s*[｜\|]*)?tool_calls?[^>]*>\s*(.*?)\s*</[｜\|]*\s*(?:DSML\s*[｜\|]*)?tool_calls?[^>]*>",
         r"```(?:tool_call|tool_calls|function_call)\s*(.*?)\s*```",
     ]
 
@@ -552,7 +567,7 @@ def extract_tool_calls(text: str) -> Tuple[str, List[OpenAIToolCall]]:
     # 5. Проверка неформатированного вызова Edit/Write файла без JSON:
     # <tool_call>\npath/to/file.py\ncode...\n</tool_call>
     raw_file_call_pat = re.compile(
-        r'<tool_calls?[^>]*>\s*([a-zA-Z]:[\\/][^ \r\n\t]+|[a-zA-Z0-9_\-\.\/]+\.[a-zA-Z0-9]+)\s+([\s\S]+?)(?:</tool_calls?>|$)',
+        r'<[｜\|]*\s*(?:DSML\s*[｜\|]*)?tool_calls?[^>]*>\s*([a-zA-Z]:[\\/][^ \r\n\t]+|[a-zA-Z0-9_\-\.\/]+\.[a-zA-Z0-9]+)\s+([\s\S]+?)(?:</[｜\|]*\s*(?:DSML\s*[｜\|]*)?tool_calls?>|$)',
         re.DOTALL
     )
     for match in raw_file_call_pat.finditer(clean_text):
@@ -598,6 +613,6 @@ def extract_tool_calls(text: str) -> Tuple[str, List[OpenAIToolCall]]:
         clean_text = clean_text.replace(match.group(0), "")
 
     # Окончательная подчистка оставшихся пустых тегов <tool_call>
-    clean_text = re.sub(r'</?tool_calls?[^>]*>', '', clean_text)
+    clean_text = re.sub(r'</?[｜\|]*\s*(?:DSML\s*[｜\|]*)?tool_calls?[^>]*>', '', clean_text)
 
     return clean_text.strip(), tool_calls

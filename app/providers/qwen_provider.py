@@ -176,14 +176,14 @@ class QwenProvider(BaseLLMProvider):
                     jwt_token = part[6:].strip()
         else:
             jwt_token = token_or_cookie.strip()
-            cookie_header = f"token={jwt_token}; qwen-thinking_mode={think_mode}; qwen-locale=ru-RU; qwen-theme=dark;"
+            cookie_header = f"token={jwt_token}; qwen-thinking_mode={think_mode}; qwen-locale=zh-CN; qwen-theme=dark;"
 
         referer = f"https://chat.qwen.ai/c/{chat_id}" if chat_id else "https://chat.qwen.ai/"
 
         headers = {
             "Accept": "application/json, text/event-stream",
             "Accept-Encoding": "gzip, deflate",
-            "Accept-Language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+            "Accept-Language": "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
             "Connection": "keep-alive",
             "Content-Type": "application/json",
             "Cookie": cookie_header,

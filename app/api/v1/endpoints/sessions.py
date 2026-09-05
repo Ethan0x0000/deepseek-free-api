@@ -14,7 +14,7 @@ async def create_new_session(
     provider: Optional[str] = Query(None, description="ID провайдера (deepseek, qwen, glm)"),
 ) -> Dict[str, Any]:
     """Создает новую сессию на серверах выбранного провайдера и сбрасывает текущий контекст."""
-    target_provider = provider_registry.get_provider(provider) if provider else provider_registry.get_default_provider()
+    target_provider = provider_registry.get_provider(provider)
 
     if target_provider.provider_id == "qwen":
         target_provider.reset_session()
@@ -34,7 +34,7 @@ async def create_new_session(
 async def get_current_session(
     provider: Optional[str] = Query(None, description="ID провайдера (deepseek, qwen, glm)"),
 ) -> Dict[str, Any]:
-    target_provider = provider_registry.get_provider(provider) if provider else provider_registry.get_default_provider()
+    target_provider = provider_registry.get_provider(provider)
     current_id = target_provider.get_current_session_id()
     parent_id = session_manager.get_parent_message_id(current_id) if current_id and target_provider.provider_id == "deepseek" else None
 
@@ -51,7 +51,7 @@ async def list_sessions(
     provider: Optional[str] = Query(None, description="ID провайдера (deepseek, qwen, glm)"),
 ) -> Dict[str, Any]:
     """Возвращает список существующих чатов с серверов провайдера."""
-    target_provider = provider_registry.get_provider(provider) if provider else provider_registry.get_default_provider()
+    target_provider = provider_registry.get_provider(provider)
     sessions = await target_provider.list_sessions()
     return {
         "provider": target_provider.provider_id,
@@ -64,7 +64,7 @@ async def list_sessions(
 async def reset_session(
     provider: Optional[str] = Query(None, description="ID провайдера (deepseek, qwen, glm)"),
 ) -> Dict[str, Any]:
-    target_provider = provider_registry.get_provider(provider) if provider else provider_registry.get_default_provider()
+    target_provider = provider_registry.get_provider(provider)
     target_provider.reset_session()
     return {
         "status": "success",

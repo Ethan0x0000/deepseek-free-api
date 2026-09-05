@@ -1,0 +1,40 @@
+# deepseek-free-api — Docker Compose 部署
+# API 端点仅绑定到内网地址 172.16.98.114:8317,公网不可达
+#
+# 常用命令:
+#   启动:   docker compose up -d --build
+#   日志:   docker compose logs -f
+#   状态:   docker compose ps
+#   停止:   docker compose down        (保留数据卷)
+#   彻底清理: docker compose down -v   (连同容器一起删除)
+
+services:
+  deepseek-free-api:
+    build: .
+    image: deepseek-free-api:local
+    container_name: deepseek-free-api
+    restart: unless-stopped
+    ports:
+      # 只绑内网 IP —— 公网 0.0.0.0 不开放
+      - "172.16.98.114:8317:8317"
+    volumes:
+      # 凭证持久化:credentials.json 写入容器内 /root/.deepseek/,
+      # 容器重建后 token 不丢失
+      - ./credentials:/root/.deepseek
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8317"
+      DEBUG: "false"
+      REQUEST_TIMEOUT: "180.0"
+      PROXY_MODE: "multi"
+      SINGLE_SESSION_MODE: "false"
+      CONTEXT_COMPRESSION_ENABLED: "true"
+      MAX_CONTEXT_TOKENS: "300000"
+      RETAIN_RECENT_MESSAGES_COUNT: "12"
+      MAX_TOOL_OUTPUT_TOKENS: "25000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8317/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s

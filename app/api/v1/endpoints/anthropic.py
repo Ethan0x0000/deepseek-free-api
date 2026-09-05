@@ -56,6 +56,24 @@ async def anthropic_messages(
             deepseek_req.prompt, max_tokens=provider_token_limit
         )
 
+    # Точный расчет токенов ввода и кэшированного контекста (Prompt Caching)
+    prompt_tokens = estimate_tokens(deepseek_req.prompt or "")
+    if len(request.messages) > 1:
+        try:
+            prefix_req, _ = convert_anthropic_request_to_deepseek(
+                AnthropicMessagesRequest(
+                    model=request.model,
+                    messages=request.messages[:-1],
+                    system=request.system,
+                    tools=request.tools,
+                )
+            )
+            cached_tokens = min(estimate_tokens(prefix_req.prompt or ""), max(0, prompt_tokens - 1))
+        except Exception:
+            cached_tokens = 0
+    else:
+        cached_tokens = 0
+
     msg_id = f"msg_{uuid.uuid4().hex[:20]}"
 
     tools_names = [t.name for t in (request.tools or [])]
@@ -100,17 +118,27 @@ async def anthropic_messages(
                             "content": [],
                             "stop_reason": None,
                             "stop_sequence": None,
-                            "usage": {"input_tokens": 0, "output_tokens": 0},
+                            "usage": {
+                                "input_tokens": prompt_tokens,
+                                "output_tokens": 0,
+                                "cache_creation_input_tokens": 0,
+                                "cache_read_input_tokens": cached_tokens,
+                            },
                         }
                     }
                     message_started = True
                     return f"event: message_start\ndata: {json.dumps(start_event, ensure_ascii=False)}\n\n"
                 return ""
 
+            latest_token_usage: Optional[int] = None
+
             try:
                 async for chunk in active_provider.stream_chat(deepseek_req):
                     if chunk.type == "error":
                         raise HTTPException(status_code=400, detail=chunk.text)
+
+                    if chunk.token_usage is not None:
+                        latest_token_usage = chunk.token_usage
 
                     # Блок рассуждений (Thinking)
                     if chunk.type == "thinking":
@@ -265,15 +293,24 @@ async def anthropic_messages(
                         yield f"event: content_block_stop\ndata: {json.dumps(cb_stop, ensure_ascii=False)}\n\n"
 
                 # message_delta
+                full_text = "".join(accumulated_content)
+                full_thinking = "".join(accumulated_thinking)
+                reasoning_tokens = estimate_tokens(full_thinking)
+                if latest_token_usage is not None:
+                    completion_tokens = latest_token_usage
+                else:
+                    completion_tokens = estimate_tokens(full_text) + reasoning_tokens
+
                 msg_delta = {
                     "type": "message_delta",
                     "delta": {"stop_reason": stop_reason, "stop_sequence": None},
-                    "usage": {"output_tokens": len(accumulated_content)},
+                    "usage": {"output_tokens": completion_tokens},
                 }
                 yield f"event: message_delta\ndata: {json.dumps(msg_delta, ensure_ascii=False)}\n\n"
 
                 # message_stop
                 yield "event: message_stop\ndata: {\"type\": \"message_stop\"}\n\n"
+                proxy_logger.log_request_end(log_id, status_code=200, tokens_out=completion_tokens)
             except Exception as e:
                 try:
                     active_provider.reset_session()
@@ -306,7 +343,13 @@ async def anthropic_messages(
         try:
             resp = await provider.send_message(deepseek_req)
 
-            result = convert_deepseek_response_to_anthropic(resp, model=request.model, has_tools=has_tools)
+            result = convert_deepseek_response_to_anthropic(
+                resp,
+                model=request.model,
+                has_tools=has_tools,
+                input_tokens=prompt_tokens,
+                cached_tokens=cached_tokens,
+            )
             proxy_logger.log_request_end(log_id, status_code=200, tokens_out=resp.token_usage or 0)
             return result
         except Exception as e:

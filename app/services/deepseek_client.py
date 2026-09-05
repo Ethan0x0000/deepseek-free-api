@@ -92,21 +92,21 @@ class DeepSeekClient:
         # 1. Модели семейства DeepSeek V4
         if model_lower in ["deepseek-v4-pro", "v4-pro", "v4", "deepseek-v4", "pro"]:
             model_type = "expert"
-            think = False if thinking_enabled is None else thinking_enabled
+            think = True if thinking_enabled is None else thinking_enabled
             search = False
         elif model_lower in ["deepseek-v4-flash", "v4-flash", "flash"]:
             model_type = "default"
-            think = False if thinking_enabled is None else thinking_enabled
+            think = True if thinking_enabled is None else thinking_enabled
             search = search_enabled if search_enabled is not None else False
         elif model_lower in ["deepseek-v4-flash-vision-exp", "v4-vision", "vision", "deepseek-vision"]:
             model_type = "vision"
-            think = False
+            think = True if thinking_enabled is None else thinking_enabled
             search = search_enabled if search_enabled is not None else False
 
         # 2. Модели поиска
         elif search_enabled is True or model_lower in ["deepseek-search", "search"]:
             model_type = "default"
-            think = False
+            think = True if thinking_enabled is None else thinking_enabled
             search = True
 
         # 3. Модели рассуждений (DeepSeek-R1)
@@ -118,7 +118,7 @@ class DeepSeekClient:
         # 4. Базовый чат DeepSeek-V3
         else:
             model_type = "expert"
-            think = False
+            think = True if thinking_enabled is None else thinking_enabled
             search = False
 
         return model_type, think, search
