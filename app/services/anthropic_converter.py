@@ -1,6 +1,6 @@
 import json
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from app.schemas.anthropic import (
     AnthropicContentBlock,
@@ -13,8 +13,14 @@ from app.schemas.chat import DeepSeekChatRequest, DeepSeekChatResponse
 from app.services.tool_parser import compact_tool_schema, extract_tool_calls
 
 
-def build_anthropic_tools_prompt(tools: List[AnthropicTool]) -> str:
+def build_anthropic_tools_prompt(
+    tools: List[AnthropicTool],
+    tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
+) -> str:
     """Генерирует системную инструкцию инструментов из формата Anthropic."""
+    if tool_choice == "none":
+        return ""
+
     raw_schema_chars = sum(
         len(json.dumps(tool.input_schema or {}))
         for tool in tools
@@ -34,26 +40,61 @@ def build_anthropic_tools_prompt(tools: List[AnthropicTool]) -> str:
 
     tools_text = "\n\n".join(tool_lines)
 
+    choice_instruction = ""
+    if tool_choice is not None:
+        if tool_choice in ["required", "any"]:
+            choice_instruction = (
+                "\n### MANDATORY TOOL EXECUTION\n"
+                "You MUST call at least one tool in this turn using `<tool_call>`.\n"
+            )
+        elif isinstance(tool_choice, dict) and tool_choice.get("name"):
+            choice_instruction = (
+                f"\n### MANDATORY TOOL EXECUTION\n"
+                f"You MUST call the tool '{tool_choice['name']}' in this turn using `<tool_call>`.\n"
+            )
+
     return f"""
 # Available Tools
 You have access to the following functions/tools to assist the user:
 
 {tools_text}
+{choice_instruction}
+# Autonomous Engineering Agent Instructions
+You are operating as an autonomous, expert software engineering agent in an interactive development workspace.
+Your primary objective is to ACCOMPLISH TASKS DIRECTLY using the provided tools, rather than merely giving instructions.
 
-# Tool Call Instructions
-CRITICAL RULES FOR TOOL CALLS:
-1. You ONLY REASON and REQUEST tool executions. You do NOT execute any commands or files yourself.
-2. DO NOT STOP with just a text promise or declaration of intent (such as "I will check...", "Let me read..."). When you need to inspect, read, search, edit, or run something, you MUST output the tool call in the SAME response!
-3. NEVER simulate, guess, or fabricate command or tool output — output the tool call and wait for the actual result from the system.
-4. When requesting a tool, output valid JSON inside `<tool_call>...</tool_call>`:
+## CORE AGENT PRINCIPLES (CRITICAL):
+1. ACTION OVER TALK (多做少说，行动优先):
+   - When the user asks you to inspect, search, modify, test, or implement something: YOU MUST EXECUTE THE TOOLS YOURSELF.
+   - NEVER tell the user to run commands or perform steps manually when you have tools to perform them.
+   - DO NOT say "You can check...", "To find out, run...", or "I suggest checking...". TAKE ACTION DIRECTLY.
+
+2. PERSISTENCE & TASK COMPLETION (不达目的不罢休):
+   - Do NOT stop halfway. Real-world tasks require multi-step loops (e.g. search -> read -> analyze -> edit -> verify).
+   - Continue calling tools iteratively until the user's request is completely solved and verified.
+   - Never stop after one step just to ask "Should I proceed?" on obvious follow-ups. Autonomously continue to the finish.
+
+3. ZERO EMPTY PROMISES (严禁只说不调):
+   - Never output conversational promises (e.g. "我来看看...", "让我检查一下...", "Let me check...") without immediately outputting the `<tool_call>` in the SAME message!
+   - Keep natural language before tool calls to a minimum (1 brief sentence or zero).
+
+4. NEVER GUESS OR SIMULATE:
+   - Never guess file contents, environment states, or command outputs. Execute the tool and wait for real output from the environment.
+
+5. TOOL CALL FORMAT:
+   When requesting a tool, output valid JSON inside `<tool_call>...</tool_call>`:
 <tool_call>
 {{"name": "<function_name>", "arguments": {{...}}}}
 </tool_call>
 
-Alternatively, standard JSON format is also accepted:
-{{"tool_call": {{"name": "<function_name>", "arguments": {{...}}}}}}
+Alternatively, standard DSML format is also accepted:
+<|DSML|tool_calls>
+<|DSML|invoke name="<function_name>">
+<|DSML|parameter name="<param_name>"><![CDATA[<param_val>]]></|DSML|parameter>
+</|DSML|invoke>
+</|DSML|tool_calls>
 
-5. If no tool call is needed and the entire task is complete, provide your normal conversational response directly.
+6. If no tool call is needed and the entire task is 100% complete, provide your normal conversational response directly.
 """.strip()
 
 
@@ -69,7 +110,8 @@ def convert_anthropic_request_to_deepseek(request: AnthropicMessagesRequest) -> 
     # 1. Инструкция по инструментам
     has_tools = bool(request.tools)
     if request.tools:
-        prompt_parts.append(build_anthropic_tools_prompt(request.tools))
+        tool_choice = getattr(request, "tool_choice", None)
+        prompt_parts.append(build_anthropic_tools_prompt(request.tools, tool_choice=tool_choice))
 
     # 2. Системный промпт (в Anthropic передается отдельно)
     if request.system:

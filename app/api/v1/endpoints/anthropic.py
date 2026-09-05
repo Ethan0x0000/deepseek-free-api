@@ -47,6 +47,13 @@ async def anthropic_messages(
     provider = provider_registry.resolve_provider_for_model(request.model)
     deepseek_req, has_tools = convert_anthropic_request_to_deepseek(request)
 
+    # Обработка изображений (Vision Multimodal): извлечение, PoW загрузка и fork в Vision
+    from app.services.image_manager import image_manager
+    vision_file_ids = await image_manager.process_images(client, request.messages)
+    if vision_file_ids:
+        deepseek_req.ref_file_ids = vision_file_ids
+        deepseek_req.model = "deepseek-v4-flash-vision-exp"
+
     from app.services.context_compressor import context_compressor, estimate_tokens
     from app.services.proxy_logger import proxy_logger
 

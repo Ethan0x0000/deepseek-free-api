@@ -1,7 +1,7 @@
 import json
 import re
 import uuid
-from typing import List, Optional, Tuple, Any, Dict
+from typing import List, Optional, Tuple, Any, Dict, Union
 from app.schemas.openai import OpenAIChatMessage, OpenAITool, OpenAIToolCall, OpenAIToolCallFunction
 
 
@@ -36,8 +36,14 @@ def compact_tool_schema(value: Any, is_root: bool = True) -> Any:
     return compact
 
 
-def build_tool_system_prompt(tools: List[OpenAITool]) -> str:
+def build_tool_system_prompt(
+    tools: List[OpenAITool],
+    tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
+) -> str:
     """Формирует системную инструкцию с описанием доступных инструментов."""
+    if tool_choice == "none":
+        return ""
+
     raw_schema_chars = sum(
         len(json.dumps(tool.function.parameters or {}))
         for tool in tools
@@ -60,27 +66,69 @@ def build_tool_system_prompt(tools: List[OpenAITool]) -> str:
 
     tools_text = "\n\n".join(tool_lines)
 
+    choice_instruction = ""
+    if tool_choice is not None:
+        if tool_choice in ["required", "any"]:
+            choice_instruction = (
+                "\n### MANDATORY TOOL EXECUTION (tool_choice='required')\n"
+                "You MUST call at least one tool in this turn. "
+                "A direct conversational answer without a `<tool_call>` block is strictly forbidden!\n"
+            )
+        elif isinstance(tool_choice, dict):
+            fn_target = tool_choice.get("function", {}).get("name") or tool_choice.get("name", "")
+            if fn_target:
+                choice_instruction = (
+                    f"\n### MANDATORY TOOL EXECUTION (tool_choice='{fn_target}')\n"
+                    f"You MUST call the tool '{fn_target}' in this turn using `<tool_call>`.\n"
+                )
+        elif isinstance(tool_choice, str) and tool_choice not in ["auto", "none"]:
+            choice_instruction = (
+                f"\n### MANDATORY TOOL EXECUTION (tool_choice='{tool_choice}')\n"
+                f"You MUST call the tool '{tool_choice}' in this turn using `<tool_call>`.\n"
+            )
+
     prompt = f"""
 # Available Tools
 You have access to the following functions/tools to assist the user:
 
 {tools_text}
+{choice_instruction}
+# Autonomous Engineering Agent Instructions
+You are operating as an autonomous, expert software engineering agent in an interactive development workspace.
+Your primary objective is to ACCOMPLISH TASKS DIRECTLY using the provided tools, rather than merely giving instructions.
 
-# Tool Call Instructions
-CRITICAL RULES FOR TOOL CALLS:
-1. You ONLY REASON and REQUEST tool executions. You do NOT execute any commands or files yourself.
-2. DO NOT STOP with just a text promise or declaration of intent (such as "Let me study...", "I will check...", "我来看看...", "让我检查一下...", "我来读取...").
-   【严格禁令】当需要检查、读取、搜索、编辑文件或运行命令时，严禁仅用自然语言表达行动意向或口头承诺！你必须在【同一条回复中】立即输出 `<tool_call>` 标签调用工具！
-3. NEVER simulate, guess, or fabricate command or tool output — output the tool call and wait for the actual result from the system.
-4. When requesting a tool, output valid JSON inside `<tool_call>...</tool_call>`:
+## CORE AGENT PRINCIPLES (CRITICAL):
+1. ACTION OVER TALK (多做少说，行动优先):
+   - When the user asks you to inspect, search, modify, test, or implement something: YOU MUST EXECUTE THE TOOLS YOURSELF.
+   - NEVER tell the user to run commands or perform steps manually when you have tools to perform them.
+   - DO NOT say "You can check...", "To find out, run...", or "I suggest checking...". TAKE ACTION DIRECTLY.
+
+2. PERSISTENCE & TASK COMPLETION (不达目的不罢休):
+   - Do NOT stop halfway. Real-world tasks require multi-step loops (e.g. search -> read -> analyze -> edit -> verify).
+   - Continue calling tools iteratively until the user's request is completely solved and verified.
+   - Never stop after one step just to ask "Should I proceed?" on obvious follow-ups. Autonomously continue to the finish.
+
+3. ZERO EMPTY PROMISES (严禁只说不调):
+   - Never output conversational promises (e.g. "我来看看...", "让我检查一下...", "Let me check...") without immediately outputting the `<tool_call>` in the SAME message!
+   - Keep natural language before tool calls to a minimum (1 brief sentence or zero).
+
+4. NEVER GUESS OR SIMULATE:
+   - Never guess file contents, environment states, or command outputs. Execute the tool and wait for real output from the environment.
+
+5. TOOL CALL FORMAT:
+   When requesting a tool, output valid JSON inside `<tool_call>...</tool_call>`:
 <tool_call>
 {{"name": "<function_name>", "arguments": {{...}}}}
 </tool_call>
 
-Alternatively, standard JSON format is also accepted:
-{{"tool_call": {{"name": "<function_name>", "arguments": {{...}}}}}}
+Alternatively, standard DSML or JSON format is also accepted:
+<|DSML|tool_calls>
+<|DSML|invoke name="<function_name>">
+<|DSML|parameter name="<param_name>"><![CDATA[<param_val>]]></|DSML|parameter>
+</|DSML|invoke>
+</|DSML|tool_calls>
 
-5. EXAMPLES OF CORRECT BEHAVIOR:
+6. EXAMPLES OF CORRECT BEHAVIOR:
 Example 1 (English):
 User: "Explore the codebase"
 Assistant:
@@ -100,26 +148,19 @@ Assistant:
 FORBIDDEN BEHAVIOR (NEVER DO THIS / 严禁只说不调):
 Assistant: "我来看看当前文件夹里有什么内容，帮你识别生产垃圾..." -> WRONG! Never stop without the `<tool_call>` block! Always invoke the tool call immediately!
 
-6. CRITICAL RULES FOR FILE EDITING / WRITING:
-When modifying or editing a file, ALWAYS invoke `Edit` or `Write` with valid JSON arguments!
+7. CRITICAL RULES FOR FILE EDITING / WRITING:
+When modifying or editing a file, ALWAYS invoke `edit` or `write` with valid JSON arguments!
 NEVER output raw code or file paths directly inside `<tool_call>` without the JSON structure:
 CORRECT:
 <tool_call>
-{{"name": "Edit", "arguments": {{"file_path": "path/to/file.py", "old_string": "exact old code", "new_string": "new code"}}}}
+{{"name": "edit", "arguments": {{"path": "path/to/file.py", "oldString": "exact old code", "newString": "new code"}}}}
 </tool_call>
 or:
 <tool_call>
-{{"name": "Write", "arguments": {{"file_path": "path/to/file.py", "content": "full new content"}}}}
+{{"name": "write", "arguments": {{"path": "path/to/file.py", "content": "full new content"}}}}
 </tool_call>
 
-FORBIDDEN (NEVER DO THIS):
-<tool_call>
-path/to/file.py
-# code...
-</tool_call>
--> WRONG! This is invalid and causes errors. Always format as valid JSON.
-
-7. If no tool call is needed and the entire task is complete, provide your normal conversational response directly.
+8. If no tool call is needed and the entire task is 100% complete, provide your normal conversational response directly.
 """
     return prompt.strip()
 
@@ -128,6 +169,7 @@ def format_messages_to_prompt(
     messages: List[OpenAIChatMessage],
     tools: Optional[List[OpenAITool]] = None,
     max_tokens: Optional[int] = None,
+    tool_choice: Optional[Union[str, Dict[str, Any]]] = None,
 ) -> str:
     """
     Преобразует историю сообщений OpenAI (system, user, assistant, tool)
@@ -141,8 +183,9 @@ def format_messages_to_prompt(
 
     # 1. Если переданы tools, добавляем системную инструкцию по инструментам
     if tools:
-        tool_instruction = build_tool_system_prompt(tools)
-        prompt_parts.append(tool_instruction)
+        tool_instruction = build_tool_system_prompt(tools, tool_choice=tool_choice)
+        if tool_instruction:
+            prompt_parts.append(tool_instruction)
 
     # 2. Обрабатываем системные и пользовательские сообщения
     system_messages = []
@@ -155,8 +198,14 @@ def format_messages_to_prompt(
             # Если переданы multipart сообщения (текст + изображения)
             text_pieces = []
             for piece in content:
-                if isinstance(piece, dict) and piece.get("type") == "text":
-                    text_pieces.append(piece.get("text", ""))
+                if isinstance(piece, dict):
+                    p_type = piece.get("type", "text")
+                    if p_type == "text":
+                        text_pieces.append(piece.get("text", ""))
+                    elif p_type in ["image_url", "image"]:
+                        text_pieces.append("[User provided an image attachment]")
+                elif isinstance(piece, str):
+                    text_pieces.append(piece)
             content = " ".join(text_pieces)
 
         if role == "system":
@@ -184,15 +233,19 @@ def format_messages_to_prompt(
         prompt_parts.append("\nConversation History:\n" + "\n".join(history_messages))
 
     # 3. Если последнее сообщение — вывод инструмента (tool output),
-    # добавляем директиву немедленно продолжить и вызвать инструмент, а не останавливаться на обещании
+    # требуем продолжить цикл выполнения агента до полного завершения задачи
     if compressed_messages and compressed_messages[-1].role in ["tool", "function"]:
         prompt_parts.append(
-            "\n[System Directive: The previous tool execution has finished and its output is provided above. Proceed with the task immediately. If you need to inspect more files or run commands, invoke the tool call NOW: <tool_call>{\"name\": \"...\", \"arguments\": {...}}</tool_call>. Do NOT stop with only a conversational promise or intent.]"
+            "\n[Autonomous Directive: The tool execution result is provided above. Proceed with the task immediately. "
+            "Analyze the output and invoke the next tool call NOW if more investigation, code editing, or verification is needed: "
+            "<tool_call>{\"name\": \"...\", \"arguments\": {...}}</tool_call>. "
+            "DO NOT stop halfway with an intermediate conversational summary. Work relentlessly until the user's objective is 100% completed!]"
         )
-    # 4. Если переданы tools и последнее сообщение от пользователя, добавляем хвостовую директиву вызова инструментов
+    # 4. Если переданы tools и последнее сообщение от пользователя, требуем действия вместо советов
     elif tools and compressed_messages and compressed_messages[-1].role == "user":
         prompt_parts.append(
-            "\n[System Directive: Tools are available. If you need to inspect files, check directories, read code, or execute commands to answer the user, you MUST invoke the tool call in this turn using `<tool_call>{\"name\": \"...\", \"arguments\": {...}}</tool_call>`. DO NOT stop with only a verbal promise or intent statement like '我来看看...' or 'Let me check...'.]"
+            "\n[Autonomous Directive: Tools are available. Action over words: If answering this request requires inspecting files, exploring directories, searching code, or executing commands, invoke the tool call directly in this turn: <tool_call>{\"name\": \"...\", \"arguments\": {...}}</tool_call>. "
+            "DO NOT respond with advice or tell the user to do it manually.]"
         )
 
     full_prompt = "\n\n".join(prompt_parts)

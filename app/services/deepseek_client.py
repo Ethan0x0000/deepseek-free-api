@@ -175,12 +175,27 @@ class DeepSeekClient:
             "user-agent": settings.USER_AGENT,
         }
 
+        # 4.1. Специальная обработка для Vision (изображения / файлы)
+        if request.ref_file_ids or model_type == "vision":
+            model_type = "vision"
+            search_enabled = False  # DeepSeek Web отключает поиск при наличии файлов
+            token = credentials_manager.get_token("deepseek")
+            if token:
+                try:
+                    from app.services.hif_provider import hif_provider
+                    hif_headers = await hif_provider.get_headers(self.client, token)
+                    headers.update(hif_headers)
+                except Exception as hif_err:
+                    logger.warning(f"Error fetching HIF headers for vision: {hif_err}")
+            headers["x-client-version"] = "2.3.0"
+            headers["x-app-version"] = "2.3.0"
+
         payload = {
             "chat_session_id": session_id,
             "parent_message_id": parent_msg_id,
             "model_type": model_type,
             "prompt": request.prompt,
-            "ref_file_ids": [],
+            "ref_file_ids": request.ref_file_ids or [],
             "thinking_enabled": thinking_enabled,
             "search_enabled": search_enabled,
             "action": None,

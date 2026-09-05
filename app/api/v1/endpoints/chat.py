@@ -117,12 +117,26 @@ async def openai_chat_completions(
 
     # 1. Форматируем все сообщения и инструменты в единый контекстный промпт с учетом лимита провайдера
     provider_token_limit = context_compressor.get_limit_for_provider(provider.provider_id)
-    compiled_prompt = format_messages_to_prompt(request.messages, request.tools, max_tokens=provider_token_limit)
+    compiled_prompt = format_messages_to_prompt(
+        request.messages,
+        request.tools,
+        max_tokens=provider_token_limit,
+        tool_choice=request.tool_choice,
+    )
+
+    # 1.1. Обработка изображений (Vision Multimodal): извлечение, PoW загрузка и fork в Vision
+    from app.services.image_manager import image_manager
+    vision_file_ids = await image_manager.process_images(client, request.messages)
 
     # Точный расчет токенов ввода и кэшированного контекста (Prompt Caching / LCP)
     prompt_tokens = estimate_tokens(compiled_prompt)
     if len(request.messages) > 1:
-        prefix_prompt = format_messages_to_prompt(request.messages[:-1], request.tools, max_tokens=provider_token_limit)
+        prefix_prompt = format_messages_to_prompt(
+            request.messages[:-1],
+            request.tools,
+            max_tokens=provider_token_limit,
+            tool_choice=request.tool_choice,
+        )
         cached_tokens = min(estimate_tokens(prefix_prompt), max(0, prompt_tokens - 1))
     else:
         cached_tokens = 0
@@ -159,10 +173,17 @@ async def openai_chat_completions(
         if "search_enabled" in request.model_extra:
             search_val = bool(request.model_extra["search_enabled"])
 
+    model_to_use = request.model
+    if vision_file_ids:
+        # Автоматически переключаем на Vision модель при наличии картинок
+        model_to_use = "deepseek-v4-flash-vision-exp"
+        search_val = False
+
     deepseek_req = DeepSeekChatRequest(
         prompt=compiled_prompt,
         chat_session_id=request.chat_session_id or request.session_id,
-        model=request.model,
+        ref_file_ids=vision_file_ids or None,
+        model=model_to_use,
         stream=request.stream,
         thinking_enabled=thinking_val,
         search_enabled=search_val,

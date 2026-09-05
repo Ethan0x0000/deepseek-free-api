@@ -11,6 +11,7 @@ class DeepSeekChatRequest(BaseModel):
     prompt: str = Field(..., min_length=1, description="Текст запроса")
     chat_session_id: Optional[str] = Field(default=None, description="ID сессии. Если не передан, используется активная или создается новая")
     parent_message_id: Optional[int] = Field(default=None, description="ID родительского сообщения для продолжения контекста")
+    ref_file_ids: Optional[List[str]] = Field(default=None, description="ID прикрепленных файлов/изображений")
     model: str = Field(default="deepseek-chat", description="Модель: deepseek-chat (expert), deepseek-reasoner (r1), deepseek-search")
     thinking_enabled: Optional[bool] = Field(default=None, description="Включить режим рассуждений (DeepSeek R1)")
     search_enabled: Optional[bool] = Field(default=None, description="Включить веб-поиск")
