@@ -215,6 +215,7 @@ async def openai_chat_completions(
             accumulated_thinking = []
             latest_token_usage: Optional[int] = None
             active_session_id: Optional[str] = None
+            sessions_to_clean: set = set()
             has_tools = bool(request.tools)
             active_provider = provider
             # tools 模式滑动窗口缓冲：避免将 <tool_call> 标签碎片过早泄露给客户端
@@ -306,7 +307,7 @@ async def openai_chat_completions(
                                 )
                                 yield f"data: {c.model_dump_json()}\n\n"
 
-                # 释放剩余缓冲区
+                # 释放剩余缓冲区 (在没有 tool 匹配风险时安全释放)
                 if has_tools and pending_tail and not TOOL_OPEN_PAT.search(pending_tail) and "<tool_call" not in pending_tail and "<invoke" not in pending_tail:
                     if not first_chunk_sent:
                         first_chunk = OpenAIChatCompletionChunk(
@@ -323,18 +324,28 @@ async def openai_chat_completions(
                         choices=[OpenAIChunkChoice(index=0, delta=OpenAIDelta(content=pending_tail))],
                     )
                     yield f"data: {c.model_dump_json()}\n\n"
-                pending_tail = ""
+                    pending_tail = ""
 
                 # 工具调用解析与补全恢复
                 finish_reason = "stop"
                 full_text = "".join(accumulated_content)
+                if active_session_id:
+                    sessions_to_clean.add(active_session_id)
+
+                allowed_tool_names = {t.function.name for t in (request.tools or []) if t.function} if request.tools else None
 
                 if has_tools:
-                    clean_text, tool_calls = extract_tool_calls(full_text)
+                    clean_text, tool_calls = extract_tool_calls(full_text, allowed_tool_names=allowed_tool_names)
                     clean_prefix = re.split(r'<[｜\|]*\s*(?:DSML\s*[｜\|]*)?tool_calls?[^>]*>', full_text)[0].strip()
 
                     # 意图检测与自动补全恢复 (Continuation Recovery)
-                    if not tool_calls and (INTENT_PAT.search(full_text) or "<tool_call" in full_text or "DSML" in full_text):
+                    # 仅在模型确实有未闭合的 tool_call 标签或表达了行动意图但未输出工具时触发，避免纯 Markdown 解释误触发
+                    has_unclosed_tool = (
+                        ("<tool_call" in full_text and "</tool_call" not in full_text)
+                        or ("<invoke" in full_text and "</invoke" not in full_text)
+                        or ("DSML" in full_text and "invoke" in full_text and ("</invoke" not in full_text and "</｜DSML｜" not in full_text))
+                    )
+                    if not tool_calls and (INTENT_PAT.search(full_text) or has_unclosed_tool):
                         logger.info("检测到行动意图声明或未闭合 tool_call，启动自动补全 (Continuation Recovery)...")
                         try:
                             action_hint = clean_prefix[-150:] if len(clean_prefix) > 150 else clean_prefix
@@ -347,13 +358,15 @@ async def openai_chat_completions(
                                     f"Output valid JSON inside <tool_call>: "
                                     f"<tool_call>\n{{\"name\": \"<function_name>\", \"arguments\": {{...}}}}\n</tool_call>]"
                                 ),
-                                chat_session_id=deepseek_req.chat_session_id,
+                                chat_session_id=active_session_id or deepseek_req.chat_session_id,
                                 model=deepseek_req.model,
                                 stream=False,
                             )
                             cont_resp = await asyncio.wait_for(active_provider.send_message(cont_req), timeout=15.0)
+                            if getattr(cont_resp, "session_id", None):
+                                sessions_to_clean.add(cont_resp.session_id)
                             logger.info(f"Continuation 响应内容: {cont_resp.content!r}")
-                            cont_clean, cont_tools = extract_tool_calls(cont_resp.content)
+                            cont_clean, cont_tools = extract_tool_calls(cont_resp.content, allowed_tool_names=allowed_tool_names)
                             if cont_tools:
                                 tool_calls = cont_tools
                                 if cont_clean:
@@ -361,6 +374,25 @@ async def openai_chat_completions(
                                 logger.info(f"✓ 成功通过 Continuation Recovery 恢复 {len(cont_tools)} 个工具调用!")
                         except Exception as cont_err:
                             logger.warning(f"Continuation Recovery 补全异常: {cont_err}")
+
+                    # 如果最终没有工具调用（例如是纯文本回答或文档解释），把因包含 <tool_call> 等文本而在滑动窗口中被扣留的尾部正文完整释放
+                    if not tool_calls and pending_tail:
+                        if not first_chunk_sent:
+                            first_chunk = OpenAIChatCompletionChunk(
+                                id=req_id,
+                                model=request.model,
+                                choices=[OpenAIChunkChoice(index=0, delta=OpenAIDelta(role="assistant"))],
+                            )
+                            yield f"data: {first_chunk.model_dump_json()}\n\n"
+                            first_chunk_sent = True
+                        proxy_logger.log_content_chunk(log_id, pending_tail)
+                        c = OpenAIChatCompletionChunk(
+                            id=req_id,
+                            model=request.model,
+                            choices=[OpenAIChunkChoice(index=0, delta=OpenAIDelta(content=pending_tail))],
+                        )
+                        yield f"data: {c.model_dump_json()}\n\n"
+                        pending_tail = ""
 
                     if tool_calls:
                         finish_reason = "tool_calls"
@@ -437,7 +469,9 @@ async def openai_chat_completions(
                 if settings.AUTO_CLEAN_WEB_SESSIONS and not (request.chat_session_id or request.session_id):
                     clean_sid = active_session_id or session_manager.get_current_session_id()
                     if clean_sid:
-                        asyncio.create_task(session_manager.delete_session(client, clean_sid))
+                        sessions_to_clean.add(clean_sid)
+                    for sid in sessions_to_clean:
+                        asyncio.create_task(session_manager.delete_session(client, sid))
 
             except Exception as e:
                 try:
@@ -460,7 +494,9 @@ async def openai_chat_completions(
                 if settings.AUTO_CLEAN_WEB_SESSIONS and not (request.chat_session_id or request.session_id):
                     clean_sid = active_session_id or session_manager.get_current_session_id()
                     if clean_sid:
-                        asyncio.create_task(session_manager.delete_session(client, clean_sid))
+                        sessions_to_clean.add(clean_sid)
+                    for sid in sessions_to_clean:
+                        asyncio.create_task(session_manager.delete_session(client, sid))
 
         return StreamingResponse(
             sse_generator(),
@@ -474,6 +510,7 @@ async def openai_chat_completions(
 
     # ── 3. 同步非流式模式 (Non-streaming) ──────────────────────────────────
     else:
+        sessions_to_clean: set = set()
         try:
             resp = await provider.send_message(deepseek_req)
 
@@ -481,12 +518,21 @@ async def openai_chat_completions(
             tool_calls: Optional[List[OpenAIToolCall]] = None
             finish_reason = "stop"
             reasoning_to_return = resp.thinking or None
+            if getattr(resp, "session_id", None):
+                sessions_to_clean.add(resp.session_id)
+
+            allowed_tool_names = {t.function.name for t in (request.tools or []) if t.function} if request.tools else None
 
             if request.tools:
-                clean_text, found_tool_calls = extract_tool_calls(resp.content)
+                clean_text, found_tool_calls = extract_tool_calls(resp.content, allowed_tool_names=allowed_tool_names)
                 clean_prefix = re.split(r'<[｜\|]*\s*(?:DSML\s*[｜\|]*)?tool_calls?[^>]*>', resp.content)[0].strip()
 
-                if not found_tool_calls and (INTENT_PAT.search(resp.content) or "<tool_call" in resp.content or "DSML" in resp.content):
+                has_unclosed_tool = (
+                    ("<tool_call" in resp.content and "</tool_call" not in resp.content)
+                    or ("<invoke" in resp.content and "</invoke" not in resp.content)
+                    or ("DSML" in resp.content and "invoke" in resp.content and ("</invoke" not in resp.content and "</｜DSML｜" not in resp.content))
+                )
+                if not found_tool_calls and (INTENT_PAT.search(resp.content) or has_unclosed_tool):
                     logger.info("Non-streaming: 检测到行动意图声明或未闭合 tool_call，启动自动补全...")
                     try:
                         action_hint = clean_prefix[-150:] if len(clean_prefix) > 150 else clean_prefix
@@ -499,12 +545,14 @@ async def openai_chat_completions(
                                 f"Output valid JSON inside <tool_call>: "
                                 f"<tool_call>\n{{\"name\": \"<function_name>\", \"arguments\": {{...}}}}\n</tool_call>]"
                             ),
-                            chat_session_id=deepseek_req.chat_session_id,
+                            chat_session_id=getattr(resp, "session_id", None) or deepseek_req.chat_session_id,
                             model=deepseek_req.model,
                             stream=False,
                         )
                         cont_resp = await asyncio.wait_for(provider.send_message(cont_req), timeout=15.0)
-                        cont_clean, cont_tools = extract_tool_calls(cont_resp.content)
+                        if getattr(cont_resp, "session_id", None):
+                            sessions_to_clean.add(cont_resp.session_id)
+                        cont_clean, cont_tools = extract_tool_calls(cont_resp.content, allowed_tool_names=allowed_tool_names)
                         if cont_tools:
                             found_tool_calls = cont_tools
                             if cont_clean:
@@ -548,7 +596,9 @@ async def openai_chat_completions(
             if settings.AUTO_CLEAN_WEB_SESSIONS and not (request.chat_session_id or request.session_id):
                 clean_sid = getattr(resp, "session_id", None) or session_manager.get_current_session_id()
                 if clean_sid:
-                    asyncio.create_task(session_manager.delete_session(client, clean_sid))
+                    sessions_to_clean.add(clean_sid)
+                for sid in sessions_to_clean:
+                    asyncio.create_task(session_manager.delete_session(client, sid))
 
             return OpenAIChatCompletionResponse(
                 id=req_id,

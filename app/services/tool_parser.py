@@ -1,7 +1,7 @@
 import json
 import re
 import uuid
-from typing import List, Optional, Tuple, Any, Dict, Union
+from typing import List, Optional, Tuple, Any, Dict, Union, Set
 from app.schemas.openai import OpenAIChatMessage, OpenAITool, OpenAIToolCall, OpenAIToolCallFunction
 
 
@@ -398,7 +398,10 @@ def _parse_all_tool_json(raw_json: str) -> List[Tuple[str, str]]:
     return results
 
 
-def extract_tool_calls(text: str) -> Tuple[str, List[OpenAIToolCall]]:
+def extract_tool_calls(
+    text: str,
+    allowed_tool_names: Optional[Set[str]] = None,
+) -> Tuple[str, List[OpenAIToolCall]]:
     """
     从模型输出内容中提取工具调用 (Tool Calls)：
     - 支持单个或多个 JSON 对象封装在 <tool_call>...</tool_call> 内
@@ -406,6 +409,7 @@ def extract_tool_calls(text: str) -> Tuple[str, List[OpenAIToolCall]]:
     - 支持 Anthropic/Claude 格式 (<invoke name="...">...</invoke>)
     - 支持 Qwen 原生标签格式 (<function=name>...</function>)
     - 支持 Markdown 代码块语法 (```tool_call...```)
+    - 可选通过 allowed_tool_names 过滤仅属于当前请求的合法工具，避免将文档说明或伪代码误识别为工具调用
     - 自动去重相同调用并返回 (清洗后的正文文本, 工具调用列表)
     """
     tool_calls: List[OpenAIToolCall] = []
@@ -418,6 +422,8 @@ def extract_tool_calls(text: str) -> Tuple[str, List[OpenAIToolCall]]:
 
     for match in re.finditer(dsml_invoke_pat, text, re.DOTALL):
         name = match.group(1).strip()
+        if allowed_tool_names is not None and name not in allowed_tool_names:
+            continue
         body = match.group(2).strip()
         args_dict = {}
         for pm in re.finditer(dsml_param_pat, body, re.DOTALL):
@@ -453,6 +459,8 @@ def extract_tool_calls(text: str) -> Tuple[str, List[OpenAIToolCall]]:
 
     for match in re.finditer(invoke_pat, text, re.DOTALL):
         name = match.group(1).strip()
+        if allowed_tool_names is not None and name not in allowed_tool_names:
+            continue
         body = match.group(2).strip()
         args_dict = {}
         for pm in re.finditer(param_pat, body, re.DOTALL):
@@ -478,8 +486,9 @@ def extract_tool_calls(text: str) -> Tuple[str, List[OpenAIToolCall]]:
                 )
             )
 
-    clean_text = re.sub(r"<[｜\|]*\s*(?:DSML\s*[｜\|]*)?tool_calls?[^>]*>\s*(?:<invoke\b.*?</invoke>\s*)+</[｜\|]*\s*(?:DSML\s*[｜\|]*)?tool_calls?>", "", clean_text, flags=re.DOTALL)
-    clean_text = re.sub(invoke_pat, "", clean_text, flags=re.DOTALL)
+    if any(tc.type == "function" for tc in tool_calls):
+        clean_text = re.sub(r"<[｜\|]*\s*(?:DSML\s*[｜\|]*)?tool_calls?[^>]*>\s*(?:<invoke\b.*?</invoke>\s*)+</[｜\|]*\s*(?:DSML\s*[｜\|]*)?tool_calls?>", "", clean_text, flags=re.DOTALL)
+        clean_text = re.sub(invoke_pat, "", clean_text, flags=re.DOTALL)
 
     # 2. 匹配标准 JSON tool_call 块
     patterns = [
@@ -491,7 +500,10 @@ def extract_tool_calls(text: str) -> Tuple[str, List[OpenAIToolCall]]:
         for match in re.finditer(pat, text, re.DOTALL):
             raw_content = match.group(1)
             parsed_list = _parse_all_tool_json(raw_content)
+            found_valid = False
             for name, args_str in parsed_list:
+                if allowed_tool_names is not None and name not in allowed_tool_names:
+                    continue
                 call_key = (name, args_str)
                 if call_key not in seen_calls:
                     seen_calls.add(call_key)
@@ -503,12 +515,16 @@ def extract_tool_calls(text: str) -> Tuple[str, List[OpenAIToolCall]]:
                             function=OpenAIToolCallFunction(name=name, arguments=args_str),
                         )
                     )
-            clean_text = re.sub(pat, "", clean_text, flags=re.DOTALL)
+                    found_valid = True
+            if found_valid:
+                clean_text = clean_text.replace(match.group(0), "")
 
     # 3. 匹配 Qwen 原生格式: <function=name>args</function>
     func_pat = r"<function=([a-zA-Z0-9_\-\.]+)[^>]*>\s*(.*?)\s*</function>"
     for match in re.finditer(func_pat, text, re.DOTALL):
         name = match.group(1).strip()
+        if allowed_tool_names is not None and name not in allowed_tool_names:
+            continue
         raw_args = match.group(2).strip()
         args_str = raw_args
         if "<parameter" in raw_args:
@@ -535,7 +551,7 @@ def extract_tool_calls(text: str) -> Tuple[str, List[OpenAIToolCall]]:
                     function=OpenAIToolCallFunction(name=name, arguments=args_str),
                 )
             )
-    clean_text = re.sub(func_pat, "", clean_text, flags=re.DOTALL)
+            clean_text = clean_text.replace(match.group(0), "")
 
     # 4. 匹配无标签裸露的 JSON 工具调用 (Naked JSON tool call)
     naked_pat = re.compile(
@@ -544,6 +560,8 @@ def extract_tool_calls(text: str) -> Tuple[str, List[OpenAIToolCall]]:
     )
     for match in naked_pat.finditer(clean_text):
         name = match.group(1).strip()
+        if allowed_tool_names is not None and name not in allowed_tool_names:
+            continue
         start_idx = match.start()
         args_brace_start = match.start(2)
 
@@ -583,7 +601,7 @@ def extract_tool_calls(text: str) -> Tuple[str, List[OpenAIToolCall]]:
                     function=OpenAIToolCallFunction(name=name, arguments=args_str),
                 )
             )
-        clean_text = clean_text.replace(block, "")
+            clean_text = clean_text.replace(block, "")
 
     # 反序结构兼容: {"arguments": ..., "name": "..."}
     naked_rev_pat = re.compile(
@@ -591,8 +609,10 @@ def extract_tool_calls(text: str) -> Tuple[str, List[OpenAIToolCall]]:
         re.DOTALL
     )
     for match in naked_rev_pat.finditer(clean_text):
-        args_raw = match.group(1).strip()
         name = match.group(2).strip()
+        if allowed_tool_names is not None and name not in allowed_tool_names:
+            continue
+        args_raw = match.group(1).strip()
         block = match.group(0)
 
         args_dict = _parse_broken_arguments(args_raw)
@@ -609,7 +629,7 @@ def extract_tool_calls(text: str) -> Tuple[str, List[OpenAIToolCall]]:
                     function=OpenAIToolCallFunction(name=name, arguments=args_str),
                 )
             )
-        clean_text = clean_text.replace(block, "")
+            clean_text = clean_text.replace(block, "")
 
     # 5. 容错提取非标准裸文件编辑指令
     raw_file_call_pat = re.compile(
@@ -636,13 +656,11 @@ def extract_tool_calls(text: str) -> Tuple[str, List[OpenAIToolCall]]:
                 is_edit = True
                 break
 
-        if is_edit:
-            tool_name = "Edit"
-            args_obj = {"file_path": fpath, "old_string": old_str, "new_string": new_str}
-        else:
-            tool_name = "Write"
-            args_obj = {"file_path": fpath, "content": code_body}
+        tool_name = "Edit" if is_edit else "Write"
+        if allowed_tool_names is not None and tool_name not in allowed_tool_names:
+            continue
 
+        args_obj = {"file_path": fpath, "old_string": old_str, "new_string": new_str} if is_edit else {"file_path": fpath, "content": code_body}
         args_str = json.dumps(args_obj, ensure_ascii=False)
         call_key = (tool_name, args_str)
         if call_key not in seen_calls:
@@ -655,9 +673,10 @@ def extract_tool_calls(text: str) -> Tuple[str, List[OpenAIToolCall]]:
                     function=OpenAIToolCallFunction(name=tool_name, arguments=args_str),
                 )
             )
-        clean_text = clean_text.replace(match.group(0), "")
+            clean_text = clean_text.replace(match.group(0), "")
 
-    # 清理残留空标签
-    clean_text = re.sub(r'</?[｜\|]*\s*(?:DSML\s*[｜\|]*)?tool_calls?[^>]*>', '', clean_text)
+    # 仅当实际提取出工具调用时清理外围空标签
+    if tool_calls:
+        clean_text = re.sub(r'</?[｜\|]*\s*(?:DSML\s*[｜\|]*)?tool_calls?[^>]*>', '', clean_text)
 
     return clean_text.strip(), tool_calls

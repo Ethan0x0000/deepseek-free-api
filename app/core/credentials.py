@@ -112,6 +112,8 @@ class CredentialsManager:
             except Exception as e:
                 logger.warning(f"更新 {self.env_file} 失败: {e}")
 
+    save_token = save
+
     @property
     def token(self) -> Optional[str]:
         return self.get_token("deepseek")
@@ -127,6 +129,13 @@ class CredentialsManager:
 
     def is_authenticated(self, provider: str = "deepseek") -> bool:
         return bool(self.get_token(provider))
+
+    def get_all_status(self) -> Dict[str, bool]:
+        self.load()
+        return {
+            "deepseek": self.is_authenticated("deepseek"),
+            "qwen": self.is_authenticated("qwen"),
+        }
 
 
 credentials_manager = CredentialsManager()

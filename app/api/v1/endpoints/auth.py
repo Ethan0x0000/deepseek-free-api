@@ -17,7 +17,7 @@ class TokenRequest(BaseModel):
 async def set_auth_token(req: TokenRequest) -> Dict[str, Any]:
     prov = (req.provider or "deepseek").lower().strip()
     try:
-        credentials_manager.save_token(req.token, provider=prov)
+        credentials_manager.save(req.token, provider=prov)
         return {
             "status": "success",
             "provider": prov,

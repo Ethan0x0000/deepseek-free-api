@@ -216,7 +216,8 @@ async def anthropic_messages(
 
                 # 工具调用解析
                 if has_tools:
-                    clean_text, tool_calls = extract_tool_calls(full_text)
+                    allowed_tool_names = {t.name for t in (request.tools or []) if t.name} if request.tools else None
+                    clean_text, tool_calls = extract_tool_calls(full_text, allowed_tool_names=allowed_tool_names)
                     if tool_calls:
                         stop_reason = "tool_use"
                         ev = emit_start()
