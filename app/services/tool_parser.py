@@ -314,8 +314,8 @@ def _parse_broken_arguments(args_str: str) -> Dict[str, Any]:
     return result
 
 
-def _parse_all_tool_json(raw_json: str) -> List[Tuple[str, str]]:
-    """解析 tool_call 块内的所有 JSON 对象 (支持单对象或并行多对象)。"""
+def _parse_all_tool_json(raw_json: str, default_name: Optional[str] = None) -> List[Tuple[str, str]]:
+    """解析 tool_call 块内的所有 JSON 对象 (支持单对象、并行多对象以及外置 name 属性模式)。"""
     results: List[Tuple[str, str]] = []
     if not raw_json:
         return results
@@ -331,8 +331,12 @@ def _parse_all_tool_json(raw_json: str) -> List[Tuple[str, str]]:
         try:
             obj, end_idx = decoder.raw_decode(s, idx)
             if isinstance(obj, dict):
-                name = obj.get("name") or obj.get("function")
-                args = obj.get("arguments") or obj.get("parameters") or obj.get("input", {})
+                name = obj.get("name") or obj.get("function") or default_name
+                args = obj.get("arguments") or obj.get("parameters") or obj.get("input")
+                if args is None and default_name and name == default_name:
+                    args = {k: v for k, v in obj.items() if k not in ["name", "function"]}
+                elif args is None:
+                    args = {}
                 if name:
                     args_str = json.dumps(args, ensure_ascii=False) if isinstance(args, dict) else str(args)
                     results.append((str(name).strip(), args_str))
@@ -349,8 +353,12 @@ def _parse_all_tool_json(raw_json: str) -> List[Tuple[str, str]]:
         try:
             data = json.loads(s, strict=False)
             if isinstance(data, dict):
-                name = data.get("name") or data.get("function")
-                args = data.get("arguments") or data.get("parameters") or data.get("input", {})
+                name = data.get("name") or data.get("function") or default_name
+                args = data.get("arguments") or data.get("parameters") or data.get("input")
+                if args is None and default_name and name == default_name:
+                    args = {k: v for k, v in data.items() if k not in ["name", "function"]}
+                elif args is None:
+                    args = {}
                 if name:
                     args_str = json.dumps(args, ensure_ascii=False) if isinstance(args, dict) else str(args)
                     results.append((str(name).strip(), args_str))
@@ -363,8 +371,12 @@ def _parse_all_tool_json(raw_json: str) -> List[Tuple[str, str]]:
             sanitized = re.sub(r'[\r\n]+', '\\n', s)
             data = json.loads(sanitized, strict=False)
             if isinstance(data, dict):
-                name = data.get("name") or data.get("function")
-                args = data.get("arguments") or data.get("parameters") or data.get("input", {})
+                name = data.get("name") or data.get("function") or default_name
+                args = data.get("arguments") or data.get("parameters") or data.get("input")
+                if args is None and default_name and name == default_name:
+                    args = {k: v for k, v in data.items() if k not in ["name", "function"]}
+                elif args is None:
+                    args = {}
                 if name:
                     args_str = json.dumps(args, ensure_ascii=False) if isinstance(args, dict) else str(args)
                     results.append((str(name).strip(), args_str))
@@ -374,8 +386,8 @@ def _parse_all_tool_json(raw_json: str) -> List[Tuple[str, str]]:
     # 回退 3: 正则提取被破坏的内部引号 JSON
     if not results:
         name_match = re.search(r'"(?:name|function)"\s*:\s*"([a-zA-Z0-9_\-\.]+)"', s)
-        if name_match:
-            name = name_match.group(1).strip()
+        name = (name_match.group(1).strip() if name_match else None) or default_name
+        if name:
             args_start = re.search(r'"(?:arguments|parameters|input)"\s*:\s*(\{)', s)
             if args_start:
                 brace_start = args_start.start(1)
@@ -394,6 +406,12 @@ def _parse_all_tool_json(raw_json: str) -> List[Tuple[str, str]]:
                     args_dict = _parse_broken_arguments(args_raw)
                     if args_dict:
                         results.append((name, json.dumps(args_dict, ensure_ascii=False)))
+            elif default_name and s.startswith("{") and s.endswith("}"):
+                args_dict = _parse_broken_arguments(s)
+                if args_dict:
+                    results.append((name, json.dumps(args_dict, ensure_ascii=False)))
+
+    return results
 
     return results
 
@@ -490,34 +508,55 @@ def extract_tool_calls(
         clean_text = re.sub(r"<[｜\|]*\s*(?:DSML\s*[｜\|]*)?tool_calls?[^>]*>\s*(?:<invoke\b.*?</invoke>\s*)+</[｜\|]*\s*(?:DSML\s*[｜\|]*)?tool_calls?>", "", clean_text, flags=re.DOTALL)
         clean_text = re.sub(invoke_pat, "", clean_text, flags=re.DOTALL)
 
-    # 2. 匹配标准 JSON tool_call 块
-    patterns = [
-        r"<[｜\|]*\s*(?:DSML\s*[｜\|]*)?tool_calls?[^>]*>\s*(.*?)\s*</[｜\|]*\s*(?:DSML\s*[｜\|]*)?tool_calls?[^>]*>",
-        r"```(?:tool_call|tool_calls|function_call)\s*(.*?)\s*```",
-    ]
+    # 2. 匹配标准 JSON tool_call / function_call 块 (支持在标签属性或后缀中指定 name="..." 或 :name)
+    tag_pat = r"<[｜\|]*\s*(?:DSML\s*[｜\|]*)?(?:tool_calls?|function_calls?|tool)(?:\s+[^>]*?name=[\"']?([^\"'>\s]+)[\"']?|:([a-zA-Z0-9_\-\.]+))?[^>]*>\s*(.*?)\s*</[｜\|]*\s*(?:DSML\s*[｜\|]*)?(?:tool_calls?|function_calls?|tool)[^>]*>"
+    md_pat = r"```(?:tool_call|tool_calls|function_call)(?::([a-zA-Z0-9_\-\.]+))?\s*(.*?)\s*```"
 
-    for pat in patterns:
-        for match in re.finditer(pat, text, re.DOTALL):
-            raw_content = match.group(1)
-            parsed_list = _parse_all_tool_json(raw_content)
-            found_valid = False
-            for name, args_str in parsed_list:
-                if allowed_tool_names is not None and name not in allowed_tool_names:
-                    continue
-                call_key = (name, args_str)
-                if call_key not in seen_calls:
-                    seen_calls.add(call_key)
-                    call_id = f"call_{uuid.uuid4().hex[:8]}"
-                    tool_calls.append(
-                        OpenAIToolCall(
-                            id=call_id,
-                            type="function",
-                            function=OpenAIToolCallFunction(name=name, arguments=args_str),
-                        )
+    for match in re.finditer(tag_pat, text, re.DOTALL):
+        def_name = match.group(1) or match.group(2)
+        raw_content = match.group(3)
+        parsed_list = _parse_all_tool_json(raw_content, default_name=def_name)
+        found_valid = False
+        for name, args_str in parsed_list:
+            if allowed_tool_names is not None and name not in allowed_tool_names:
+                continue
+            call_key = (name, args_str)
+            if call_key not in seen_calls:
+                seen_calls.add(call_key)
+                call_id = f"call_{uuid.uuid4().hex[:8]}"
+                tool_calls.append(
+                    OpenAIToolCall(
+                        id=call_id,
+                        type="function",
+                        function=OpenAIToolCallFunction(name=name, arguments=args_str),
                     )
-                    found_valid = True
-            if found_valid:
-                clean_text = clean_text.replace(match.group(0), "")
+                )
+                found_valid = True
+        if found_valid:
+            clean_text = clean_text.replace(match.group(0), "")
+
+    for match in re.finditer(md_pat, text, re.DOTALL):
+        def_name = match.group(1)
+        raw_content = match.group(2)
+        parsed_list = _parse_all_tool_json(raw_content, default_name=def_name)
+        found_valid = False
+        for name, args_str in parsed_list:
+            if allowed_tool_names is not None and name not in allowed_tool_names:
+                continue
+            call_key = (name, args_str)
+            if call_key not in seen_calls:
+                seen_calls.add(call_key)
+                call_id = f"call_{uuid.uuid4().hex[:8]}"
+                tool_calls.append(
+                    OpenAIToolCall(
+                        id=call_id,
+                        type="function",
+                        function=OpenAIToolCallFunction(name=name, arguments=args_str),
+                    )
+                )
+                found_valid = True
+        if found_valid:
+            clean_text = clean_text.replace(match.group(0), "")
 
     # 3. 匹配 Qwen 原生格式: <function=name>args</function>
     func_pat = r"<function=([a-zA-Z0-9_\-\.]+)[^>]*>\s*(.*?)\s*</function>"

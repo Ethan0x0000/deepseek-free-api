@@ -230,7 +230,7 @@ async def openai_chat_completions(
             active_provider = provider
             # tools 模式滑动窗口缓冲：避免将 <tool_call> 标签碎片过早泄露给客户端
             pending_tail = ""
-            TOOL_OPEN_PAT = re.compile(r"<[｜\|]*\s*(?:tool_calls?|invoke|DSML)\b", re.IGNORECASE)
+            TOOL_OPEN_PAT = re.compile(r"<[｜\|]*\s*(?:tool_calls?|function_calls?|invoke|DSML|tool)\b", re.IGNORECASE)
 
             def flush_live_content(text_piece: str) -> str:
                 """保留滑动尾部，安全释放正文内容"""
