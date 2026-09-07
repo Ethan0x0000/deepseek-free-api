@@ -91,3 +91,22 @@ async def test_auth_token_set(monkeypatch, tmp_path):
         status_resp = await ac.get("/api/v1/auth/status")
         assert status_resp.status_code == 200
         assert status_resp.json()["authenticated"] is True
+
+
+@pytest.mark.asyncio
+async def test_thinking_tool_call_recovery():
+    """测试当模型把 tool_call 误输出在思考过程 (Thinking) 中时，服务端能够成功拯救并转为 tool_calls。"""
+    from app.services.tool_parser import extract_tool_calls
+
+    thinking_with_tool = """我们开始执行。先创建目录，然后安装。
+我们执行：
+<tool_call>
+{"name": "shell", "arguments": {"command": "mkdir -p ~/.agents/skills", "workdir": "/Users/ethan"}}
+</tool_call>"""
+
+    clean_text, tools = extract_tool_calls(thinking_with_tool, allowed_tool_names={"shell"})
+    assert len(tools) == 1
+    assert tools[0].function.name == "shell"
+    assert "mkdir -p ~/.agents/skills" in tools[0].function.arguments
+    assert "<tool_call>" not in clean_text
+

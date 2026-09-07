@@ -246,6 +246,15 @@ async def anthropic_messages(
                 if has_tools:
                     allowed_tool_names = {t.name for t in (request.tools or []) if t.name} if request.tools else None
                     clean_text, tool_calls = extract_tool_calls(full_text, allowed_tool_names=allowed_tool_names)
+                    # 兜底：如果正文中没有工具调用，但 thinking 思考链中误输出了工具调用，智能拦截纠偏
+                    if not tool_calls and accumulated_thinking:
+                        th_full = "".join(accumulated_thinking)
+                        thinking_clean, thinking_tools = extract_tool_calls(th_full, allowed_tool_names=allowed_tool_names)
+                        if thinking_tools:
+                            logger.warning(f"Anthropic streaming: 成功从 thinking 中拯救 {len(thinking_tools)} 个工具调用！")
+                            tool_calls = thinking_tools
+                            clean_text = ""
+
                     if tool_calls:
                         stop_reason = "tool_use"
                         ev = emit_start()

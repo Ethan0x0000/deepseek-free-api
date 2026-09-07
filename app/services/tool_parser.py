@@ -160,7 +160,12 @@ or:
 {{"name": "write", "arguments": {{"path": "path/to/file.py", "content": "full new content"}}}}
 </tool_call>
 
-8. If no tool call is needed and the entire task is 100% complete, provide your normal conversational response directly.
+8. CRITICAL RULES FOR REASONING / THINKING MODELS (严禁在思考阶段输出工具调用):
+- SEPARATION OF THOUGHT AND ACTION: In your internal thinking/reasoning process (the thought monologue), you must ONLY think, analyze, and plan. NEVER, UNDER ANY CIRCUMSTANCES, emit `<tool_call>` or `<|DSML|...>` tags inside the thinking phase!
+- TOOL CALLS IN FINAL RESPONSE ONLY: All `<tool_call>` blocks MUST be emitted in your final assistant response AFTER thinking has completely finished.
+- ZERO FALSE CLAIMS: Never claim, hallucinate, or pretend that you have already executed a command, created a directory, or completed an action unless you have actually received the tool execution output from the environment. If an action needs to be taken, output `<tool_call>` and STOP.
+
+9. If no tool call is needed and the entire task is 100% complete, provide your normal conversational response directly.
 """
     return prompt.strip()
 
@@ -235,15 +240,16 @@ def format_messages_to_prompt(
     if compressed_messages and compressed_messages[-1].role in ["tool", "function"]:
         prompt_parts.append(
             "\n[Autonomous Directive: The tool execution result is provided above. Proceed with the task immediately. "
-            "Analyze the output and invoke the next tool call NOW if more investigation, code editing, or verification is needed: "
+            "Analyze the output and invoke the next tool call in your final response if more investigation, code editing, or verification is needed: "
             "<tool_call>{\"name\": \"...\", \"arguments\": {...}}</tool_call>. "
+            "Plan in thought, but emit <tool_call> ONLY in your final response, NEVER inside thinking. "
             "DO NOT stop halfway with an intermediate conversational summary. Work relentlessly until the user's objective is 100% completed!]"
         )
     # 4. 如果提供了 tools 且最后一条是用户指令，注入行动优先指令
     elif tools and compressed_messages and compressed_messages[-1].role == "user":
         prompt_parts.append(
-            "\n[Autonomous Directive: Tools are available. Action over words: If answering this request requires inspecting files, exploring directories, searching code, or executing commands, invoke the tool call directly in this turn: <tool_call>{\"name\": \"...\", \"arguments\": {...}}</tool_call>. "
-            "DO NOT respond with advice or tell the user to do it manually.]"
+            "\n[Autonomous Directive: Tools are available. Action over words: If answering this request requires inspecting files, exploring directories, searching code, or executing commands, plan in thought, then invoke the tool call in your final response: <tool_call>{\"name\": \"...\", \"arguments\": {...}}</tool_call>. "
+            "DO NOT emit <tool_call> inside your thinking, and DO NOT respond with conversational promises or claim you completed an action without real tool execution.]"
         )
 
     full_prompt = "\n\n".join(prompt_parts)

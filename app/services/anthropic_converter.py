@@ -234,6 +234,15 @@ def convert_deepseek_response_to_anthropic(
 
     if has_tools:
         clean_text, found_tool_calls = extract_tool_calls(resp.content)
+        # 兜底：如果正文中没有工具调用，但 thinking 思考链中误输出了工具调用，智能拦截纠偏
+        if not found_tool_calls and resp.thinking:
+            thinking_clean, thinking_tools = extract_tool_calls(resp.thinking)
+            if thinking_tools:
+                logger.warning(f"Anthropic converter: 成功从 thinking 中拯救 {len(thinking_tools)} 个工具调用！")
+                found_tool_calls = thinking_tools
+                resp.thinking = thinking_clean
+                clean_text = ""
+
         if found_tool_calls:
             stop_reason = "tool_use"
             for tc in found_tool_calls:

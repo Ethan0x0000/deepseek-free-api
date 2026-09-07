@@ -246,6 +246,7 @@ async def openai_chat_completions(
             active_provider = provider
             # tools 模式滑动窗口缓冲：避免将 <tool_call> 标签碎片过早泄露给客户端
             pending_tail = ""
+            pending_thinking_tail = ""
             TOOL_OPEN_PAT = re.compile(r"<[｜\|]*\s*(?:tool_calls?|function_calls?|invoke|DSML|tool)\b", re.IGNORECASE)
 
             def flush_live_content(text_piece: str) -> str:
@@ -263,6 +264,21 @@ async def openai_chat_completions(
                 pending_tail = pending_tail[cut:]
                 return safe
 
+            def flush_live_thinking(text_piece: str) -> str:
+                """保留滑动尾部，避免将 thinking 阶段意外出现的 <tool_call> 标签碎片泄露给客户端 reasoning_content"""
+                nonlocal pending_thinking_tail
+                pending_thinking_tail += text_piece
+                m = TOOL_OPEN_PAT.search(pending_thinking_tail)
+                if m:
+                    safe = pending_thinking_tail[: m.start()]
+                    pending_thinking_tail = pending_thinking_tail[m.start():]
+                    return safe
+                hold = 12
+                cut = len(pending_thinking_tail) - hold if len(pending_thinking_tail) > hold else 0
+                safe = pending_thinking_tail[:cut]
+                pending_thinking_tail = pending_thinking_tail[cut:]
+                return safe
+
             try:
                 async for chunk in active_provider.stream_chat(deepseek_req):
                     if chunk.type == "error":
@@ -278,24 +294,37 @@ async def openai_chat_completions(
                     if chunk.type == "thinking":
                         proxy_logger.log_thinking_chunk(log_id, chunk.text)
                         accumulated_thinking.append(chunk.text)
-                        if not first_chunk_sent:
-                            first_chunk = OpenAIChatCompletionChunk(
+                        safe_thinking = flush_live_thinking(chunk.text) if has_tools else chunk.text
+
+                        if safe_thinking:
+                            if not first_chunk_sent:
+                                first_chunk = OpenAIChatCompletionChunk(
+                                    id=req_id,
+                                    model=request.model,
+                                    choices=[OpenAIChunkChoice(index=0, delta=OpenAIDelta(role="assistant"))],
+                                )
+                                yield f"data: {first_chunk.model_dump_json()}\n\n"
+                                first_chunk_sent = True
+
+                            c = OpenAIChatCompletionChunk(
                                 id=req_id,
                                 model=request.model,
-                                choices=[OpenAIChunkChoice(index=0, delta=OpenAIDelta(role="assistant"))],
+                                choices=[OpenAIChunkChoice(index=0, delta=OpenAIDelta(reasoning_content=safe_thinking))],
                             )
-                            yield f"data: {first_chunk.model_dump_json()}\n\n"
-                            first_chunk_sent = True
-
-                        c = OpenAIChatCompletionChunk(
-                            id=req_id,
-                            model=request.model,
-                            choices=[OpenAIChunkChoice(index=0, delta=OpenAIDelta(reasoning_content=chunk.text))],
-                        )
-                        yield f"data: {c.model_dump_json()}\n\n"
+                            yield f"data: {c.model_dump_json()}\n\n"
 
                     # 正文内容 (Content)
                     elif chunk.type == "content":
+                        # 如果思考链结束且有剩余的无工具标签的纯文本尾巴，安全释放给客户端
+                        if pending_thinking_tail and not TOOL_OPEN_PAT.search(pending_thinking_tail) and "<tool_call" not in pending_thinking_tail and "<invoke" not in pending_thinking_tail:
+                            c = OpenAIChatCompletionChunk(
+                                id=req_id,
+                                model=request.model,
+                                choices=[OpenAIChunkChoice(index=0, delta=OpenAIDelta(reasoning_content=pending_thinking_tail))],
+                            )
+                            yield f"data: {c.model_dump_json()}\n\n"
+                            pending_thinking_tail = ""
+
                         accumulated_content.append(chunk.text)
                         if not has_tools:
                             if not first_chunk_sent:
@@ -363,6 +392,15 @@ async def openai_chat_completions(
                 if has_tools:
                     clean_text, tool_calls = extract_tool_calls(full_text, allowed_tool_names=allowed_tool_names)
                     clean_prefix = re.split(r'<[｜\|]*\s*(?:DSML\s*[｜\|]*)?tool_calls?[^>]*>', full_text)[0].strip()
+
+                    # ── 核心防御：如果在正文中没有提取到工具调用，检查 thinking 思考链中是否误包含了工具调用 ──
+                    if not tool_calls and accumulated_thinking:
+                        thinking_full = "".join(accumulated_thinking)
+                        thinking_clean, thinking_tools = extract_tool_calls(thinking_full, allowed_tool_names=allowed_tool_names)
+                        if thinking_tools:
+                            logger.warning(f"检测到模型将 {len(thinking_tools)} 个工具调用误输出在 Thinking 思考阶段，已自动拦截并提升为正式 Tool Call！")
+                            tool_calls = thinking_tools
+                            clean_text = ""
 
                     # 意图检测与自动补全恢复 (Continuation Recovery)
                     # 仅在模型确实有未闭合的 tool_call 标签或表达了行动意图但未输出工具时触发，避免纯 Markdown 解释误触发
@@ -552,6 +590,15 @@ async def openai_chat_completions(
             if request.tools:
                 clean_text, found_tool_calls = extract_tool_calls(resp.content, allowed_tool_names=allowed_tool_names)
                 clean_prefix = re.split(r'<[｜\|]*\s*(?:DSML\s*[｜\|]*)?tool_calls?[^>]*>', resp.content)[0].strip()
+
+                # ── 核心防御：如果在正文中没有提取到工具调用，检查 thinking 中是否误包含了工具调用 ──
+                if not found_tool_calls and getattr(resp, "thinking", None):
+                    thinking_clean, thinking_tools = extract_tool_calls(resp.thinking, allowed_tool_names=allowed_tool_names)
+                    if thinking_tools:
+                        logger.warning(f"Non-streaming: 检测到模型将 {len(thinking_tools)} 个工具调用误输出在 Thinking 思考阶段，已自动拦截并提升为正式 Tool Call！")
+                        found_tool_calls = thinking_tools
+                        reasoning_to_return = thinking_clean
+                        clean_text = None
 
                 has_unclosed_tool = (
                     ("<tool_call" in resp.content and "</tool_call" not in resp.content)
