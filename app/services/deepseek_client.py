@@ -1,5 +1,6 @@
 import json
 import logging
+import time
 from typing import AsyncGenerator, Dict, List, Optional, Tuple, Any
 from fastapi import HTTPException, status
 import httpx
@@ -134,142 +135,212 @@ class DeepSeekClient:
         self,
         request: DeepSeekChatRequest
     ) -> AsyncGenerator[StreamChunk, None]:
-        """向 DeepSeek 发送流式对话请求并自动求解 PoW。"""
+        """向 DeepSeek 发送流式对话请求并自动求解 PoW，具备多账号熔断与快速故障转移机制。"""
         if not credentials_manager.is_authenticated("deepseek"):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="DeepSeek 认证凭证未配置。请通过 /api/v1/auth/token 接口或 credentials.json 提供 Token。"
             )
 
-        # 1. 确定当前请求绑定的 Token (优先使用上游已锁定的 active_token，其次复用会话对应账号，否则从 Token 池轮询健康 Token)
-        active_token: Optional[str] = request.active_token
-        if not active_token and request.chat_session_id:
-            active_token = session_manager.get_session_token(request.chat_session_id)
-        if not active_token:
-            active_token = credentials_manager.get_token("deepseek", rotate=True)
+        all_tokens = credentials_manager.get_all_tokens("deepseek")
+        max_attempts = max(1, len(all_tokens))
+        last_exception = None
 
-        if not active_token:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="DeepSeek 所有可用 Token 均处于冷却或不可用状态。"
-            )
+        for attempt in range(max_attempts):
+            # 1. 确定当前请求绑定的 Token (优先使用上游已锁定的 active_token，其次复用会话对应账号，否则从 Token 池轮询健康 Token)
+            active_token: Optional[str] = request.active_token
+            if not active_token and request.chat_session_id:
+                active_token = session_manager.get_session_token(request.chat_session_id)
+            if not active_token:
+                active_token = credentials_manager.get_token("deepseek", rotate=True)
 
-        # 2. 获取或创建会话 (锁定 active_token)
-        session_id = await session_manager.get_or_create_session(
-            self.client, request.chat_session_id, token=active_token
-        )
-        
-        # 3. 确定 parent_message_id
-        parent_msg_id = request.parent_message_id
-        if parent_msg_id is None:
-            parent_msg_id = session_manager.get_parent_message_id(session_id)
-
-        # 4. 确定模型参数
-        model_type, thinking_enabled, search_enabled = self.resolve_model_params(
-            request.model, request.thinking_enabled, request.search_enabled
-        )
-
-        # 5. 计算 PoW challenge (传入匹配的 active_token)
-        target_path = "/api/v0/chat/completion"
-        try:
-            pow_header = await pow_solver.get_pow_header(self.client, target_path, token=active_token)
-        except Exception as e:
-            logger.error(f"计算 PoW 挑战失败 (Token: ***{active_token[-6:]}): {e}")
-            raise HTTPException(
-                status_code=status.HTTP_502_BAD_GATEWAY,
-                detail=f"求解 DeepSeek Proof-of-Work 失败: {str(e)}"
-            )
-
-        headers = {
-            "accept": "*/*",
-            "authorization": f"Bearer {active_token}",
-            "content-type": "application/json",
-            "sec-ch-ua": '"Not=A?Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"',
-            "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": '"Windows"',
-            "x-client-bundle-id": settings.CLIENT_BUNDLE_ID,
-            "x-client-locale": settings.CLIENT_LOCALE,
-            "x-client-platform": settings.CLIENT_PLATFORM,
-            "x-client-timezone-offset": settings.CLIENT_TIMEZONE_OFFSET,
-            "x-client-version": settings.CLIENT_VERSION,
-            "x-ds-pow-response": pow_header,
-            "referrer": f"{settings.DEEPSEEK_BASE_URL}/a/chat/s/{session_id}",
-            "user-agent": settings.USER_AGENT,
-        }
-
-        # 5.1. 针对视觉多模态的特殊处理
-        if request.ref_file_ids or model_type == "vision":
-            model_type = "vision"
-            search_enabled = False  # DeepSeek 网页端存在文件时禁用搜索
-            token = active_token
-            if token:
-                try:
-                    from app.services.hif_provider import hif_provider
-                    hif_headers = await hif_provider.get_headers(self.client, token)
-                    headers.update(hif_headers)
-                except Exception as hif_err:
-                    logger.warning(f"获取 Vision HIF 签名失败: {hif_err}")
-            headers["x-client-version"] = "2.3.0"
-            headers["x-app-version"] = "2.3.0"
-
-        payload = {
-            "chat_session_id": session_id,
-            "parent_message_id": parent_msg_id,
-            "model_type": model_type,
-            "prompt": request.prompt,
-            "ref_file_ids": request.ref_file_ids or [],
-            "thinking_enabled": thinking_enabled,
-            "search_enabled": search_enabled,
-            "action": None,
-            "preempt": False,
-        }
-
-        url = f"{settings.DEEPSEEK_BASE_URL}{target_path}"
-        last_message_id: Optional[int] = None
-        extracted_title: Optional[str] = None
-
-        try:
-            req = self.client.build_request("POST", url, json=payload, headers=headers, timeout=settings.REQUEST_TIMEOUT)
-            resp = await self.client.send(req, stream=True)
-
-            if resp.status_code != 200:
-                body = await resp.aread()
-                err_text = body.decode("utf-8", errors="replace")
-                masked_tok = f"{active_token[:6]}...{active_token[-4:]}" if len(active_token) > 10 else "***"
-                logger.error(f"DeepSeek [Token: {masked_tok}] 返回错误状态码 {resp.status_code}: {err_text}")
-
-                lower_err = err_text.lower()
-                if resp.status_code in [401, 403] or "已被禁言" in err_text or "规范" in err_text or "authorization failed" in lower_err:
-                    credentials_manager.mark_token_status(
-                        "deepseek", active_token, cooldown_seconds=86400, error=f"HTTP {resp.status_code}: {err_text[:120]}"
-                    )
-                    logger.warning(f"Token [{masked_tok}] 触发官方封禁/鉴权失败，已自动隔离冷却 24 小时")
-                elif resp.status_code == 429 or "too many" in lower_err or "频繁" in err_text:
-                    credentials_manager.mark_token_status(
-                        "deepseek", active_token, cooldown_seconds=60, error="HTTP 429 Too Many Requests"
-                    )
-                    logger.warning(f"Token [{masked_tok}] 触发频率限制 (429)，已自动冷却 60 秒")
-                else:
-                    credentials_manager.mark_token_status("deepseek", active_token, error=f"HTTP {resp.status_code}")
-
-                if resp.status_code in [400, 404] or "session" in err_text.lower():
-                    session_manager.invalidate_current_session()
+            if not active_token:
                 raise HTTPException(
-                    status_code=resp.status_code,
-                    detail=f"DeepSeek 错误: {err_text}"
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="DeepSeek 所有可用 Token 均处于冷却或不可用状态。"
                 )
 
-            async for chunk in parse_sse_lines(resp.aiter_lines(), session_id):
-                if chunk.message_id:
-                    last_message_id = chunk.message_id
-                if chunk.type == "title" and chunk.text:
-                    extracted_title = chunk.text
-                yield chunk
+            # 2. 获取或创建会话 (锁定 active_token)
+            session_id = await session_manager.get_or_create_session(
+                self.client, request.chat_session_id, token=active_token
+            )
 
-        finally:
-            if last_message_id:
-                session_manager.update_session_state(session_id, last_message_id, extracted_title)
-                credentials_manager.mark_token_status("deepseek", active_token, is_success=True)
+            # 3. 确定 parent_message_id
+            parent_msg_id = request.parent_message_id
+            if parent_msg_id is None:
+                parent_msg_id = session_manager.get_parent_message_id(session_id)
+
+            # 4. 确定模型参数
+            model_type, thinking_enabled, search_enabled = self.resolve_model_params(
+                request.model, request.thinking_enabled, request.search_enabled
+            )
+
+            # 5. 计算 PoW challenge (传入匹配的 active_token)
+            target_path = "/api/v0/chat/completion"
+            try:
+                pow_header = await pow_solver.get_pow_header(self.client, target_path, token=active_token)
+            except Exception as e:
+                masked_tok = f"{active_token[:6]}...{active_token[-4:]}" if len(active_token) > 10 else "***"
+                logger.error(f"计算 PoW 挑战失败 (Token: {masked_tok}): {e}")
+                credentials_manager.mark_token_status("deepseek", active_token, cooldown_seconds=60, error=f"PoW failure: {e}")
+                last_exception = HTTPException(
+                    status_code=status.HTTP_502_BAD_GATEWAY,
+                    detail=f"求解 DeepSeek Proof-of-Work 失败: {str(e)}"
+                )
+                request.active_token = None
+                continue
+
+            headers = {
+                "accept": "*/*",
+                "authorization": f"Bearer {active_token}",
+                "content-type": "application/json",
+                "sec-ch-ua": '"Not=A?Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"',
+                "sec-ch-ua-mobile": "?0",
+                "sec-ch-ua-platform": '"Windows"',
+                "x-client-bundle-id": settings.CLIENT_BUNDLE_ID,
+                "x-client-locale": settings.CLIENT_LOCALE,
+                "x-client-platform": settings.CLIENT_PLATFORM,
+                "x-client-timezone-offset": settings.CLIENT_TIMEZONE_OFFSET,
+                "x-client-version": settings.CLIENT_VERSION,
+                "x-ds-pow-response": pow_header,
+                "referrer": f"{settings.DEEPSEEK_BASE_URL}/a/chat/s/{session_id}",
+                "user-agent": settings.USER_AGENT,
+            }
+
+            # 5.1. 针对视觉多模态的特殊处理
+            if request.ref_file_ids or model_type == "vision":
+                model_type = "vision"
+                search_enabled = False  # DeepSeek 网页端存在文件时禁用搜索
+                token = active_token
+                if token:
+                    try:
+                        from app.services.hif_provider import hif_provider
+                        hif_headers = await hif_provider.get_headers(self.client, token)
+                        headers.update(hif_headers)
+                    except Exception as hif_err:
+                        logger.warning(f"获取 Vision HIF 签名失败: {hif_err}")
+                headers["x-client-version"] = "2.3.0"
+                headers["x-app-version"] = "2.3.0"
+
+            payload = {
+                "chat_session_id": session_id,
+                "parent_message_id": parent_msg_id,
+                "model_type": model_type,
+                "prompt": request.prompt,
+                "ref_file_ids": request.ref_file_ids or [],
+                "thinking_enabled": thinking_enabled,
+                "search_enabled": search_enabled,
+                "action": None,
+                "preempt": False,
+            }
+
+            url = f"{settings.DEEPSEEK_BASE_URL}{target_path}"
+            last_message_id: Optional[int] = None
+            extracted_title: Optional[str] = None
+            chunk_streamed = False
+
+            try:
+                req = self.client.build_request("POST", url, json=payload, headers=headers, timeout=settings.REQUEST_TIMEOUT)
+                resp = await self.client.send(req, stream=True)
+
+                if resp.status_code != 200:
+                    body = await resp.aread()
+                    err_text = body.decode("utf-8", errors="replace")
+                    masked_tok = f"{active_token[:6]}...{active_token[-4:]}" if len(active_token) > 10 else "***"
+                    logger.error(f"DeepSeek [Token: {masked_tok}] 返回错误状态码 {resp.status_code}: {err_text}")
+
+                    lower_err = err_text.lower()
+                    if resp.status_code in [401, 403] or "已被禁言" in err_text or "规范" in err_text or "authorization failed" in lower_err:
+                        credentials_manager.mark_token_status(
+                            "deepseek", active_token, cooldown_seconds=86400, error=f"HTTP {resp.status_code}: {err_text[:120]}"
+                        )
+                        logger.warning(f"Token [{masked_tok}] 触发官方封禁/鉴权失败，已自动隔离冷却 24 小时")
+                    elif resp.status_code == 429 or "too many" in lower_err or "频繁" in err_text:
+                        credentials_manager.mark_token_status(
+                            "deepseek", active_token, cooldown_seconds=60, error="HTTP 429 Too Many Requests"
+                        )
+                        logger.warning(f"Token [{masked_tok}] 触发频率限制 (429)，已自动冷却 60 秒")
+                    else:
+                        credentials_manager.mark_token_status("deepseek", active_token, error=f"HTTP {resp.status_code}")
+
+                    if resp.status_code in [400, 404] or "session" in err_text.lower():
+                        session_manager.invalidate_current_session()
+                    session_manager._session_tokens.pop(session_id, None)
+                    request.active_token = None
+                    last_exception = HTTPException(
+                        status_code=resp.status_code,
+                        detail=f"DeepSeek 错误: {err_text}"
+                    )
+                    continue
+
+                # 检查是否返回了非 SSE 的 JSON 业务报错 (如 HTTP 200 但包含 user is muted)
+                content_type = resp.headers.get("content-type", "").lower()
+                if "application/json" in content_type:
+                    body = await resp.aread()
+                    try:
+                        data = json.loads(body.decode("utf-8", errors="replace"))
+                    except Exception:
+                        data = {}
+                    biz_data = data.get("data", {})
+                    biz_code = biz_data.get("biz_code") if isinstance(biz_data, dict) else None
+                    biz_msg = biz_data.get("biz_msg") if isinstance(biz_data, dict) else data.get("msg", "")
+
+                    masked_tok = f"{active_token[:6]}...{active_token[-4:]}" if len(active_token) > 10 else "***"
+                    logger.error(f"DeepSeek [Token: {masked_tok}] 返回业务异常 JSON: {data}")
+
+                    if biz_code == 5 or "user is muted" in str(biz_msg).lower() or "muted" in str(biz_msg).lower() or "禁言" in str(biz_msg):
+                        mute_until = None
+                        if isinstance(biz_data, dict):
+                            inner = biz_data.get("biz_data", {})
+                            if isinstance(inner, dict):
+                                mute_until = inner.get("mute_until")
+                        cooldown = 86400
+                        if mute_until and mute_until > time.time():
+                            cooldown = mute_until - time.time() + 60
+                        credentials_manager.mark_token_status(
+                            "deepseek", active_token, cooldown_seconds=cooldown, error=f"官方禁言: {biz_msg} (直至 {mute_until})"
+                        )
+                        logger.warning(f"Token [{masked_tok}] 处于官方禁言状态，已自动隔离冷却 {int(cooldown)} 秒")
+                    else:
+                        credentials_manager.mark_token_status("deepseek", active_token, cooldown_seconds=60, error=f"业务错误: {biz_msg}")
+
+                    session_manager._session_tokens.pop(session_id, None)
+                    request.active_token = None
+                    last_exception = HTTPException(
+                        status_code=status.HTTP_403_FORBIDDEN if biz_code == 5 else status.HTTP_502_BAD_GATEWAY,
+                        detail=f"DeepSeek 错误: {biz_msg or data}"
+                    )
+                    continue
+
+                # 正常 SSE 流式解析并向下游推送
+                async for chunk in parse_sse_lines(resp.aiter_lines(), session_id):
+                    chunk_streamed = True
+                    if chunk.message_id:
+                        last_message_id = chunk.message_id
+                    if chunk.type == "title" and chunk.text:
+                        extracted_title = chunk.text
+                    if chunk.type == "error":
+                        if "muted" in chunk.text.lower() or "禁言" in chunk.text:
+                            credentials_manager.mark_token_status("deepseek", active_token, cooldown_seconds=86400, error=chunk.text)
+                        elif "too many" in chunk.text.lower() or "频繁" in chunk.text:
+                            credentials_manager.mark_token_status("deepseek", active_token, cooldown_seconds=60, error=chunk.text)
+                    yield chunk
+
+                if last_message_id:
+                    session_manager.update_session_state(session_id, last_message_id, extracted_title)
+                    credentials_manager.mark_token_status("deepseek", active_token, is_success=True)
+                return
+
+            except HTTPException as e:
+                if chunk_streamed:
+                    raise e
+                last_exception = e
+                session_manager._session_tokens.pop(session_id, None)
+                request.active_token = None
+                continue
+
+        if last_exception:
+            raise last_exception
 
     async def send_message(
         self,
