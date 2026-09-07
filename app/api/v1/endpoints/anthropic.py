@@ -45,17 +45,34 @@ async def anthropic_messages(
     provider = provider_registry.resolve_provider_for_model(request.model)
     deepseek_req, has_tools = convert_anthropic_request_to_deepseek(request)
 
-    # 提前锁定本次请求的 active_token，确保全流程一致
+    # 提前锁定本次请求的 active_token，确保全流程一致 (支持多账号容灾重试)
     active_token: Optional[str] = None
     if request.chat_session_id or getattr(request, "session_id", None):
         sid = request.chat_session_id or getattr(request, "session_id", None)
         active_token = session_manager.get_session_token(sid)
-    if not active_token:
-        active_token = credentials_manager.get_token("deepseek", rotate=True)
 
     # 图像多模态处理 (Vision Multimodal): 提取图片、计算 PoW、上传并 fork 给 Vision 模型
     from app.services.image_manager import image_manager
-    vision_file_ids = await image_manager.process_images(client, request.messages, token=active_token)
+    has_images = bool(image_manager.extract_images_from_messages(request.messages))
+    vision_file_ids = []
+    if has_images:
+        max_upload_attempts = max(1, len(credentials_manager.get_all_tokens("deepseek")))
+        last_upload_err = None
+        for _ in range(max_upload_attempts):
+            if not active_token:
+                active_token = credentials_manager.get_token("deepseek", rotate=True)
+            try:
+                vision_file_ids = await image_manager.process_images(client, request.messages, token=active_token)
+                break
+            except Exception as e:
+                last_upload_err = e
+                active_token = None
+                continue
+        if not vision_file_ids and last_upload_err:
+            raise HTTPException(status_code=400, detail=f"图片上传解析失败: {last_upload_err}")
+    elif not active_token:
+        active_token = credentials_manager.get_token("deepseek", rotate=True)
+
     if vision_file_ids:
         deepseek_req.ref_file_ids = vision_file_ids
         deepseek_req.model = "deepseek-v4-flash-vision-exp"

@@ -1,0 +1,55 @@
+[0m
+> build · deepseek-v4-flash-free
+I'll write the two files and run the test to verify all three limiters work as expected.
+[0m← [0mWrite rate_limiter.py
+Created file successfully: rate_limiter.py
+> build · deepseek-v4-flash-free
+[0m← [0mWrite test_rate_limiter.py
+Created file successfully: test_rate_limiter.py
+> build · deepseek-v4-flash-free
+I'll execute the test script to validate all three rate limiters under high concurrency.
+[0m$ [0mpython3 test_rate_limiter.py
+Running rate limiter tests...
+
+✅ SlidingWindowRateLimiter passed
+✅ TokenBucketRateLimiter passed
+✅ LeakyBucketRateLimiter passed
+
+✅ SlidingWindowRateLimiter context manager passed
+✅ TokenBucketRateLimiter context manager passed
+✅ LeakyBucketRateLimiter context manager passed
+
+✅ SlidingWindow high-concurrency passed (allowed 10)
+✅ TokenBucket high-concurrency passed (allowed 20)
+✅ LeakyBucket high-concurrency passed (allowed 5)
+
+🎉 All tests passed!
+> build · deepseek-v4-flash-free
+All tasks completed successfully:
+
+- **rate_limiter.py** created with three asynchronous rate limiters:
+  - `SlidingWindowRateLimiter` (sliding window log algorithm)
+  - `TokenBucketRateLimiter` (token bucket algorithm)
+  - `LeakyBucketRateLimiter` (leaky bucket algorithm)
+  - Each supports `acquire()` and `async with` context manager usage with asyncio locks.
+- **test_rate_limiter.py** written with comprehensive tests including basic functionality, context manager usage, and high‑concurrency scenarios.
+- Test execution passed with no errors:
+  ```
+  Running rate limiter tests...
+
+  ✅ SlidingWindowRateLimiter passed
+  ✅ TokenBucketRateLimiter passed
+  ✅ LeakyBucketRateLimiter passed
+
+  ✅ SlidingWindowRateLimiter context manager passed
+  ✅ TokenBucketRateLimiter context manager passed
+  ✅ LeakyBucketRateLimiter context manager passed
+
+  ✅ SlidingWindow high-concurrency passed (allowed 10)
+  ✅ TokenBucket high-concurrency passed (allowed 20)
+  ✅ LeakyBucket high-concurrency passed (allowed 5)
+
+  🎉 All tests passed!
+  ```
+
+All three limiters are verified to work correctly under concurrent asyncio workloads.

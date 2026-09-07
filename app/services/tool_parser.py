@@ -437,6 +437,29 @@ def extract_tool_calls(
     # 0. 检验 DeepSeek 原生 DSML 格式
     dsml_invoke_pat = r"<[｜\|]*\s*DSML\s*[｜\|]*invoke\s+name=[\"']?([^\"'>]+)[\"']?[^>]*>\s*(.*?)\s*</[｜\|]*\s*DSML\s*[｜\|]*invoke>"
     dsml_param_pat = r"<[｜\|]*\s*DSML\s*[｜\|]*parameter\s+name=[\"']?([^\"'>]+)[\"']?[^>]*>\s*(.*?)\s*</[｜\|]*\s*DSML\s*[｜\|]*parameter>"
+    hybrid_dsml_pat = r"<[｜\|]*\s*(?:DSML\s*[｜\|]*)?tool_calls?[^>]*>\s*<[｜\|]*\s*DSML\s*[｜\|]*parameter\s+name=[\"']?name[\"']?[^>]*>(.*?)</[｜\|]*\s*DSML\s*[｜\|]*parameter>\s*<[｜\|]*\s*DSML\s*[｜\|]*parameter\s+name=[\"']?(?:arguments|input|parameters)[\"']?[^>]*>(.*?)(?:</[｜\|]*\s*DSML\s*[｜\|]*parameter>|\s*</[｜\|]*\s*DSML\s*[｜\|]*invoke>|\s*</tool_calls?>|$)"
+
+    for match in re.finditer(hybrid_dsml_pat, text, re.DOTALL):
+        name = match.group(1).strip()
+        if allowed_tool_names is not None and name not in allowed_tool_names:
+            continue
+        args_raw = match.group(2).strip()
+        try:
+            args_obj = json.loads(args_raw, strict=False)
+            args_str = json.dumps(args_obj, ensure_ascii=False) if isinstance(args_obj, dict) else str(args_raw)
+        except Exception:
+            args_str = args_raw
+        call_key = (name, args_str)
+        if call_key not in seen_calls:
+            seen_calls.add(call_key)
+            call_id = f"call_{uuid.uuid4().hex[:8]}"
+            tool_calls.append(
+                OpenAIToolCall(
+                    id=call_id,
+                    type="function",
+                    function=OpenAIToolCallFunction(name=name, arguments=args_str),
+                )
+            )
 
     for match in re.finditer(dsml_invoke_pat, text, re.DOTALL):
         name = match.group(1).strip()
@@ -468,6 +491,7 @@ def extract_tool_calls(
             )
 
     clean_text = re.sub(r"<[｜\|]*\s*DSML\s*[｜\|]*tool_calls?>.*?</[｜\|]*\s*DSML\s*[｜\|]*tool_calls?>", "", clean_text, flags=re.DOTALL)
+    clean_text = re.sub(hybrid_dsml_pat, "", clean_text, flags=re.DOTALL)
     clean_text = re.sub(dsml_invoke_pat, "", clean_text, flags=re.DOTALL)
     clean_text = re.sub(r"</?[｜\|]*\s*DSML\s*[｜\|]*[^>]*>", "", clean_text)
 

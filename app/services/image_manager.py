@@ -9,6 +9,7 @@ import hashlib
 import logging
 import mimetypes
 import re
+import time
 from typing import Any, Dict, List, Optional, Tuple, Union
 import httpx
 
@@ -152,11 +153,32 @@ class ImageManager:
                     f"Image upload failed with status {upload_resp.status_code}: {upload_resp.text[:200]}"
                 )
 
-            res_data = upload_resp.json()
+            res_data = upload_resp.json() or {}
+            data_obj = res_data.get("data") or {}
+            biz_code = data_obj.get("biz_code") if isinstance(data_obj, dict) else None
+            biz_msg = data_obj.get("biz_msg") if isinstance(data_obj, dict) else ""
+
+            if biz_code in [5, 14] or "muted" in str(biz_msg).lower() or "禁言" in str(biz_msg):
+                mute_until = None
+                inner_biz = data_obj.get("biz_data") or {}
+                if isinstance(inner_biz, dict):
+                    mute_until = inner_biz.get("mute_until")
+                cooldown = 86400
+                if mute_until and mute_until > time.time():
+                    cooldown = mute_until - time.time() + 60
+                credentials_manager.mark_token_status(
+                    "deepseek", tok, cooldown_seconds=cooldown, error=f"官方禁言: {biz_msg}"
+                )
+                logger.warning(f"Token [***{tok[-6:]}] 处于官方禁言状态 (upload_file)，已自动隔离冷却 {int(cooldown)} 秒")
+                raise RuntimeError(f"DeepSeek 账号已被禁言: {biz_msg}")
+
             if res_data.get("code") != 0:
                 raise RuntimeError(f"Image upload rejected: {res_data}")
 
-            raw_file_id = res_data["data"]["biz_data"]["id"]
+            biz_data = data_obj.get("biz_data") or {}
+            raw_file_id = biz_data.get("id")
+            if not raw_file_id:
+                raise RuntimeError(f"Image upload response missing file_id: {res_data}")
             logger.info(f"Image uploaded successfully, file_id: {raw_file_id}")
 
             # Step 2: Poll file until SUCCESS or timeout (up to 20s)
@@ -200,11 +222,15 @@ class ImageManager:
             if fork_resp.status_code != 200:
                 raise RuntimeError(f"Fork to vision failed HTTP {fork_resp.status_code}: {fork_resp.text[:200]}")
 
-            fork_data = fork_resp.json()
+            fork_data = fork_resp.json() or {}
             if fork_data.get("code") != 0:
                 raise RuntimeError(f"Fork to vision rejected: {fork_data}")
 
-            vision_file_id = fork_data["data"]["biz_data"]["id"]
+            fork_data_obj = fork_data.get("data") or {}
+            fork_biz = fork_data_obj.get("biz_data") or {}
+            vision_file_id = fork_biz.get("id")
+            if not vision_file_id:
+                raise RuntimeError(f"Fork to vision response missing id: {fork_data}")
             logger.info(f"Forked to vision, vision_file_id: {vision_file_id}")
 
             # Step 4: Poll vision file until SUCCESS (up to 25s)

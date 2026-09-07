@@ -131,12 +131,28 @@ async def openai_chat_completions(
     incoming_sid = request.chat_session_id or getattr(request, "session_id", None)
     if incoming_sid:
         active_token = session_manager.get_session_token(incoming_sid)
-    if not active_token:
-        active_token = credentials_manager.get_token("deepseek", rotate=True)
 
-    # 1.1. 处理图像 (Vision 多模态): 提取、计算 PoW、上传并分支到 Vision 模型
+    # 1.1. 处理图像 (Vision 多模态): 提取、计算 PoW、上传并分支到 Vision 模型 (支持多账号容灾重试)
     from app.services.image_manager import image_manager
-    vision_file_ids = await image_manager.process_images(client, request.messages, token=active_token)
+    has_images = bool(image_manager.extract_images_from_messages(request.messages))
+    vision_file_ids = []
+    if has_images:
+        max_upload_attempts = max(1, len(credentials_manager.get_all_tokens("deepseek")))
+        last_upload_err = None
+        for _ in range(max_upload_attempts):
+            if not active_token:
+                active_token = credentials_manager.get_token("deepseek", rotate=True)
+            try:
+                vision_file_ids = await image_manager.process_images(client, request.messages, token=active_token)
+                break
+            except Exception as e:
+                last_upload_err = e
+                active_token = None
+                continue
+        if not vision_file_ids and last_upload_err:
+            raise HTTPException(status_code=400, detail=f"图片上传解析失败: {last_upload_err}")
+    elif not active_token:
+        active_token = credentials_manager.get_token("deepseek", rotate=True)
 
     # 精确计算输入与缓存 Token 数量 (Prompt Caching / LCP)
     prompt_tokens = estimate_tokens(compiled_prompt)

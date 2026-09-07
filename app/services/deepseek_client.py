@@ -143,7 +143,7 @@ class DeepSeekClient:
             )
 
         all_tokens = credentials_manager.get_all_tokens("deepseek")
-        max_attempts = max(1, len(all_tokens))
+        max_attempts = max(3, len(all_tokens) + 1)
         last_exception = None
 
         for attempt in range(max_attempts):
@@ -313,18 +313,32 @@ class DeepSeekClient:
                     continue
 
                 # 正常 SSE 流式解析并向下游推送
+                rate_limited_early = False
                 async for chunk in parse_sse_lines(resp.aiter_lines(), session_id):
+                    if chunk.type == "error":
+                        err_lower = chunk.text.lower()
+                        if "muted" in err_lower or "禁言" in chunk.text:
+                            credentials_manager.mark_token_status("deepseek", active_token, cooldown_seconds=86400, error=chunk.text)
+                        elif "too many" in err_lower or "频繁" in chunk.text or "frequent" in err_lower or "rate_limit" in err_lower:
+                            if not chunk_streamed:
+                                rate_limited_early = True
+                                logger.warning(f"DeepSeek 网页端触发瞬时频控 (rate_limit_reached)，准备短暂退避重试...")
+                                break
                     chunk_streamed = True
                     if chunk.message_id:
                         last_message_id = chunk.message_id
                     if chunk.type == "title" and chunk.text:
                         extracted_title = chunk.text
-                    if chunk.type == "error":
-                        if "muted" in chunk.text.lower() or "禁言" in chunk.text:
-                            credentials_manager.mark_token_status("deepseek", active_token, cooldown_seconds=86400, error=chunk.text)
-                        elif "too many" in chunk.text.lower() or "频繁" in chunk.text:
-                            credentials_manager.mark_token_status("deepseek", active_token, cooldown_seconds=60, error=chunk.text)
                     yield chunk
+
+                if rate_limited_early:
+                    import asyncio
+                    await asyncio.sleep(2.5)
+                    last_exception = HTTPException(
+                        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                        detail="DeepSeek 触发瞬时频控，已自动退避重试"
+                    )
+                    continue
 
                 if last_message_id:
                     session_manager.update_session_state(session_id, last_message_id, extracted_title)
