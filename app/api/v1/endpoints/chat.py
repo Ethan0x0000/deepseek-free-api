@@ -14,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 from app.api.deps import get_http_client
 from app.core.config import settings
+from app.core.credentials import credentials_manager
 from app.providers.registry import provider_registry
 from app.schemas.chat import DeepSeekChatRequest, DeepSeekChatResponse, StreamChunk
 from app.schemas.openai import (
@@ -125,9 +126,17 @@ async def openai_chat_completions(
         tool_choice=request.tool_choice,
     )
 
+    # 提前锁定本次请求的 active_token，确保图片上传、会话创建、PoW 求解和推理全程使用同一 Token
+    active_token: Optional[str] = None
+    incoming_sid = request.chat_session_id or getattr(request, "session_id", None)
+    if incoming_sid:
+        active_token = session_manager.get_session_token(incoming_sid)
+    if not active_token:
+        active_token = credentials_manager.get_token("deepseek", rotate=True)
+
     # 1.1. 处理图像 (Vision 多模态): 提取、计算 PoW、上传并分支到 Vision 模型
     from app.services.image_manager import image_manager
-    vision_file_ids = await image_manager.process_images(client, request.messages)
+    vision_file_ids = await image_manager.process_images(client, request.messages, token=active_token)
 
     # 精确计算输入与缓存 Token 数量 (Prompt Caching / LCP)
     prompt_tokens = estimate_tokens(compiled_prompt)
@@ -188,6 +197,7 @@ async def openai_chat_completions(
         stream=request.stream,
         thinking_enabled=thinking_val,
         search_enabled=search_val,
+        active_token=active_token,
     )
 
     req_id = f"chatcmpl-{uuid.uuid4().hex[:12]}"

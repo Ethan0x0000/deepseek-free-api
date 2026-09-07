@@ -16,6 +16,7 @@ class DeepSeekChatRequest(BaseModel):
     thinking_enabled: Optional[bool] = Field(default=None, description="是否启用深度思考 (DeepSeek R1 / Thinking)")
     search_enabled: Optional[bool] = Field(default=None, description="是否开启联网搜索")
     stream: bool = Field(default=True, description="是否启用流式输出 (SSE)")
+    active_token: Optional[str] = Field(default=None, description="本次请求锁定的认证 Token")
 
 
 class StreamChunk(BaseModel):

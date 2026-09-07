@@ -141,9 +141,9 @@ class DeepSeekClient:
                 detail="DeepSeek 认证凭证未配置。请通过 /api/v1/auth/token 接口或 credentials.json 提供 Token。"
             )
 
-        # 1. 确定当前请求绑定的 Token (会话亲和性：若存在历史会话则复用对应账号，否则从 Token 池轮询健康 Token)
-        active_token: Optional[str] = None
-        if request.chat_session_id:
+        # 1. 确定当前请求绑定的 Token (优先使用上游已锁定的 active_token，其次复用会话对应账号，否则从 Token 池轮询健康 Token)
+        active_token: Optional[str] = request.active_token
+        if not active_token and request.chat_session_id:
             active_token = session_manager.get_session_token(request.chat_session_id)
         if not active_token:
             active_token = credentials_manager.get_token("deepseek", rotate=True)

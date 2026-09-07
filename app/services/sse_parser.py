@@ -213,7 +213,12 @@ class SSEParser:
         if event_type == "hint":
             err_content = ""
             if isinstance(data, dict):
-                err_content = data.get("content") or data.get("finish_reason") or ""
+                content_str = data.get("content") or ""
+                finish_reason = data.get("finish_reason") or ""
+                if content_str and finish_reason and finish_reason != content_str:
+                    err_content = f"{content_str} ({finish_reason})"
+                else:
+                    err_content = content_str or finish_reason or ""
             elif isinstance(data, str):
                 err_content = data
             logger.warning(f"DeepSeek 返回 hint 事件: {err_content}")

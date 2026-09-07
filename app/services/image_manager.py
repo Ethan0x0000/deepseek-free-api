@@ -101,31 +101,33 @@ class ImageManager:
         image_bytes: bytes,
         filename: str = "image.png",
         mime_type: str = "image/png",
+        token: Optional[str] = None,
     ) -> str:
         """
         Uploads image to DeepSeek, polls OCR status, forks to vision, and returns vision_file_id.
-        Reuses cached file_id if image was already uploaded.
+        Reuses cached file_id if image was already uploaded under the same token account.
         """
+        tok = token or credentials_manager.get_token("deepseek", rotate=False)
+        if not tok:
+            raise RuntimeError("DeepSeek authentication token not configured.")
+
         img_hash = hashlib.sha256(image_bytes).hexdigest()
-        if img_hash in self._cache:
-            logger.info(f"Using cached vision_file_id for image {img_hash[:8]}: {self._cache[img_hash]}")
-            return self._cache[img_hash]
+        cache_key = f"{tok}:{img_hash}"
+        if cache_key in self._cache:
+            logger.info(f"Using cached vision_file_id for image {img_hash[:8]}: {self._cache[cache_key]}")
+            return self._cache[cache_key]
 
         async with self._lock:
             # Re-check inside lock
-            if img_hash in self._cache:
-                return self._cache[img_hash]
+            if cache_key in self._cache:
+                return self._cache[cache_key]
 
-            token = credentials_manager.get_token("deepseek")
-            if not token:
-                raise RuntimeError("DeepSeek authentication token not configured.")
-
-            # Step 1: PoW for file upload
+            # Step 1: PoW for file upload (传入绑定的 tok，保证挑战与上传签名一致)
             target_path = "/api/v0/file/upload_file"
-            pow_header = await pow_solver.get_pow_header(client, target_path)
+            pow_header = await pow_solver.get_pow_header(client, target_path, token=tok)
 
             headers = {
-                "Authorization": f"Bearer {token}",
+                "Authorization": f"Bearer {tok}",
                 "User-Agent": settings.USER_AGENT,
                 "Accept": "application/json",
                 "Origin": BASE_URL,
@@ -137,7 +139,7 @@ class ImageManager:
 
             files = {"file": (filename, image_bytes, mime_type)}
 
-            logger.info(f"Uploading image ({len(image_bytes)} bytes) to {target_path}...")
+            logger.info(f"Uploading image ({len(image_bytes)} bytes, Token: ***{tok[-6:]}) to {target_path}...")
             upload_resp = await client.post(
                 f"{BASE_URL}{target_path}",
                 headers=headers,
@@ -159,7 +161,7 @@ class ImageManager:
 
             # Step 2: Poll file until SUCCESS or timeout (up to 20s)
             status_headers = {
-                "Authorization": f"Bearer {token}",
+                "Authorization": f"Bearer {tok}",
                 "Accept": "application/json",
                 "Origin": BASE_URL,
                 "Referer": f"{BASE_URL}/",
@@ -179,7 +181,8 @@ class ImageManager:
                             # Ready for forking (CONTENT_EMPTY is normal for pure binary images before OCR)
                             break
                         if status in ["FAILED", "ERROR"]:
-                            raise RuntimeError(f"File upload parsing failed: {status}")
+                            err_code = files_list[0].get("error_code")
+                            raise RuntimeError(f"File upload parsing failed: {status} (error_code: {err_code})")
 
             # Step 3: Fork to Vision
             logger.info(f"Forking file {raw_file_id} to vision model...")
@@ -218,17 +221,21 @@ class ImageManager:
                         v_status = files_list[0].get("status", "").upper()
                         if v_status == "SUCCESS":
                             logger.info(f"✓ Vision file {vision_file_id} is ready for inference!")
-                            self._cache[img_hash] = vision_file_id
+                            self._cache[cache_key] = vision_file_id
                             return vision_file_id
                         if v_status in ["FAILED", "ERROR"]:
-                            raise RuntimeError(f"Vision file processing failed: {v_status}")
+                            err_code = files_list[0].get("error_code")
+                            raise RuntimeError(f"Vision file processing failed: {v_status} (error_code: {err_code})")
 
             # Fallback return vision_file_id even if poll timed out (sometimes DeepSeek processes concurrently)
-            self._cache[img_hash] = vision_file_id
+            self._cache[cache_key] = vision_file_id
             return vision_file_id
 
     async def process_images(
-        self, client: httpx.AsyncClient, messages: List[Any]
+        self,
+        client: httpx.AsyncClient,
+        messages: List[Any],
+        token: Optional[str] = None,
     ) -> List[str]:
         """
         Extracts and uploads all images from messages concurrently.
@@ -238,19 +245,29 @@ class ImageManager:
         if not extracted:
             return []
 
-        logger.info(f"Detected {len(extracted)} image(s) in messages. Processing for DeepSeek Vision...")
+        tok = token or credentials_manager.get_token("deepseek", rotate=False)
+        logger.info(f"Detected {len(extracted)} image(s) in messages. Processing for DeepSeek Vision (Token: ***{tok[-6:] if tok else 'None'})...")
         tasks = [
-            self.upload_image_for_vision(client, img_bytes, filename, mime)
+            self.upload_image_for_vision(client, img_bytes, filename, mime, token=tok)
             for img_bytes, mime, filename in extracted
         ]
         results = await asyncio.gather(*tasks, return_exceptions=True)
 
         valid_file_ids = []
+        errors = []
         for idx, res in enumerate(results):
             if isinstance(res, Exception):
                 logger.error(f"Failed to upload image #{idx+1}: {res}")
+                errors.append(res)
             else:
                 valid_file_ids.append(res)
+
+        if errors and not valid_file_ids:
+            from fastapi import HTTPException
+            raise HTTPException(
+                status_code=400,
+                detail=f"图片上传解析失败: {errors[0]}"
+            )
 
         return valid_file_ids
 

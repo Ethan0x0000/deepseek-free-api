@@ -10,6 +10,7 @@ logger = logging.getLogger(__name__)
 
 
 from app.api.deps import get_http_client
+from app.core.credentials import credentials_manager
 from app.providers.registry import provider_registry
 from app.schemas.anthropic import (
     AnthropicMessagesRequest,
@@ -44,12 +45,22 @@ async def anthropic_messages(
     provider = provider_registry.resolve_provider_for_model(request.model)
     deepseek_req, has_tools = convert_anthropic_request_to_deepseek(request)
 
+    # 提前锁定本次请求的 active_token，确保全流程一致
+    active_token: Optional[str] = None
+    if request.chat_session_id or getattr(request, "session_id", None):
+        sid = request.chat_session_id or getattr(request, "session_id", None)
+        active_token = session_manager.get_session_token(sid)
+    if not active_token:
+        active_token = credentials_manager.get_token("deepseek", rotate=True)
+
     # 图像多模态处理 (Vision Multimodal): 提取图片、计算 PoW、上传并 fork 给 Vision 模型
     from app.services.image_manager import image_manager
-    vision_file_ids = await image_manager.process_images(client, request.messages)
+    vision_file_ids = await image_manager.process_images(client, request.messages, token=active_token)
     if vision_file_ids:
         deepseek_req.ref_file_ids = vision_file_ids
         deepseek_req.model = "deepseek-v4-flash-vision-exp"
+
+    deepseek_req.active_token = active_token
 
     from app.services.context_compressor import context_compressor, estimate_tokens
     from app.services.proxy_logger import proxy_logger
