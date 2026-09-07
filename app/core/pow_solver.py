@@ -3,7 +3,7 @@ import base64
 import json
 import logging
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 import httpx
 from app.core.config import settings
 from app.core.credentials import credentials_manager
@@ -34,11 +34,17 @@ class PoWSolver:
             except Exception as e:
                 logger.warning(f"自动下载 sha3_wasm_bg.wasm 失败: {e}")
 
-    async def get_challenge(self, client: httpx.AsyncClient, target_path: str = "/api/v0/chat/completion") -> Dict[str, Any]:
+    async def get_challenge(
+        self,
+        client: httpx.AsyncClient,
+        target_path: str = "/api/v0/chat/completion",
+        token: Optional[str] = None,
+    ) -> Dict[str, Any]:
         url = f"{settings.DEEPSEEK_BASE_URL}/api/v0/chat/create_pow_challenge"
+        auth_val = f"Bearer {token}" if token else credentials_manager.auth_header
         headers = {
             "accept": "*/*",
-            "authorization": credentials_manager.auth_header,
+            "authorization": auth_val,
             "content-type": "application/json",
             "x-client-bundle-id": settings.CLIENT_BUNDLE_ID,
             "x-client-locale": settings.CLIENT_LOCALE,
@@ -112,8 +118,13 @@ class PoWSolver:
         json_bytes = json.dumps(pow_response, separators=(",", ":")).encode("utf-8")
         return base64.b64encode(json_bytes).decode("utf-8")
 
-    async def get_pow_header(self, client: httpx.AsyncClient, target_path: str = "/api/v0/chat/completion") -> str:
-        challenge_data = await self.get_challenge(client, target_path)
+    async def get_pow_header(
+        self,
+        client: httpx.AsyncClient,
+        target_path: str = "/api/v0/chat/completion",
+        token: Optional[str] = None,
+    ) -> str:
+        challenge_data = await self.get_challenge(client, target_path, token=token)
         return await self.solve_challenge(challenge_data)
 
 

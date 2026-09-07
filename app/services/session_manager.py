@@ -20,6 +20,8 @@ class SessionManager:
         self._provider_sessions: Dict[str, Optional[str]] = {}
         # session_id -> last_message_id (用于维持同会话内的消息链)
         self._last_message_ids: Dict[str, Optional[int]] = {}
+        # session_id -> token (用于维持会话亲和性 Session Affinity，确保同一会话始终由同一 Token 提供服务)
+        self._session_tokens: Dict[str, str] = {}
         # 会话标题缓存
         self._session_titles: Dict[str, str] = {}
         # 会话模式: single (单会话累积) 或 multi (每请求独立临时会话)
@@ -67,6 +69,7 @@ class SessionManager:
         """当服务端报错或会话失效时，废弃当前会话。"""
         if self._current_session_id:
             logger.warning(f"废弃 DeepSeek 失效会话: {self._current_session_id}")
+            self._session_tokens.pop(self._current_session_id, None)
             self._last_message_ids.pop(self._current_session_id, None)
             self._provider_sessions.pop("deepseek", None)
             self._current_session_id = None
@@ -74,11 +77,22 @@ class SessionManager:
     def get_current_session_id(self) -> Optional[str]:
         return self._current_session_id
 
-    def set_current_session_id(self, session_id: str) -> None:
+    def set_current_session_id(self, session_id: str, token: Optional[str] = None) -> None:
         self._current_session_id = session_id
         self._provider_sessions["deepseek"] = session_id
         if session_id not in self._last_message_ids:
             self._last_message_ids[session_id] = None
+        if token:
+            self._session_tokens[session_id] = token
+
+    def get_session_token(self, session_id: str) -> Optional[str]:
+        """获取指定会话绑定的 Token。"""
+        return self._session_tokens.get(session_id)
+
+    def bind_session_token(self, session_id: str, token: str) -> None:
+        """显式绑定会话与 Token 的关联。"""
+        if session_id and token:
+            self._session_tokens[session_id] = token
 
     def get_parent_message_id(self, session_id: str) -> Optional[int]:
         return self._last_message_ids.get(session_id)
@@ -88,12 +102,13 @@ class SessionManager:
         if title:
             self._session_titles[session_id] = title
 
-    async def create_new_session(self, client: httpx.AsyncClient) -> str:
-        """在 DeepSeek 网页端创建新的会话。"""
+    async def create_new_session(self, client: httpx.AsyncClient, token: Optional[str] = None) -> str:
+        """在 DeepSeek 网页端创建新的会话。支持传入指定的 Token 以支持多账号调度。"""
         url = f"{settings.DEEPSEEK_BASE_URL}/api/v0/chat_session/create"
+        auth_val = f"Bearer {token}" if token else credentials_manager.auth_header
         headers = {
             "accept": "*/*",
-            "authorization": credentials_manager.auth_header,
+            "authorization": auth_val,
             "content-type": "application/json",
             "x-client-bundle-id": settings.CLIENT_BUNDLE_ID,
             "x-client-locale": settings.CLIENT_LOCALE,
@@ -127,10 +142,12 @@ class SessionManager:
         self._current_session_id = session_id
         self._provider_sessions["deepseek"] = session_id
         self._last_message_ids[session_id] = None
+        if token:
+            self._session_tokens[session_id] = token
         logger.info(f"已创建 DeepSeek 网页会话: {session_id}")
         return session_id
 
-    async def delete_session(self, client: httpx.AsyncClient, session_id: str) -> None:
+    async def delete_session(self, client: httpx.AsyncClient, session_id: str, token: Optional[str] = None) -> None:
         """
         在后台静默删除 DeepSeek 网页端的临时会话。
         防止 AI Agent 的大量代码测试与中间轮次把用户的网页左侧对话列表刷屏。
@@ -138,10 +155,12 @@ class SessionManager:
         if not session_id:
             return
         try:
+            tok = token or self._session_tokens.get(session_id)
+            auth_val = f"Bearer {tok}" if tok else credentials_manager.auth_header
             url = f"{settings.DEEPSEEK_BASE_URL}/api/v0/chat_session/delete"
             headers = {
                 "accept": "*/*",
-                "authorization": credentials_manager.auth_header,
+                "authorization": auth_val,
                 "content-type": "application/json",
                 "x-client-platform": settings.CLIENT_PLATFORM,
                 "x-client-version": settings.CLIENT_VERSION,
@@ -152,8 +171,15 @@ class SessionManager:
                 logger.debug(f"已自动清理网页端临时会话: {session_id}")
         except Exception as e:
             logger.debug(f"后台清理网页端会话失败 (非致命): {e}")
+        finally:
+            self._session_tokens.pop(session_id, None)
 
-    async def get_or_create_session(self, client: httpx.AsyncClient, session_id: Optional[str] = None) -> str:
+    async def get_or_create_session(
+        self,
+        client: httpx.AsyncClient,
+        session_id: Optional[str] = None,
+        token: Optional[str] = None,
+    ) -> str:
         """
         获取指定的 session_id，或在单会话模式下复用，或创建全新临时会话。
         """
@@ -162,6 +188,8 @@ class SessionManager:
                 self._last_message_ids[session_id] = None
             self._current_session_id = session_id
             self._provider_sessions["deepseek"] = session_id
+            if token and session_id not in self._session_tokens:
+                self._session_tokens[session_id] = token
             return session_id
 
         # 单会话模式下复用保存的会话
@@ -170,10 +198,12 @@ class SessionManager:
             if saved:
                 logger.debug(f"复用当前 DeepSeek 单会话 (Single-Session): {saved}")
                 self._current_session_id = saved
+                if token and saved not in self._session_tokens:
+                    self._session_tokens[saved] = token
                 return saved
 
         # 默认 multi 模式创建全新会话
-        return await self.create_new_session(client)
+        return await self.create_new_session(client, token=token)
 
     def reset_context(self) -> None:
         """重置当前活跃会话。"""

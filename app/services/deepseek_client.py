@@ -135,31 +135,46 @@ class DeepSeekClient:
         request: DeepSeekChatRequest
     ) -> AsyncGenerator[StreamChunk, None]:
         """向 DeepSeek 发送流式对话请求并自动求解 PoW。"""
-        if not credentials_manager.is_authenticated():
+        if not credentials_manager.is_authenticated("deepseek"):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="DeepSeek 认证凭证未配置。请通过 /api/v1/auth/token 接口或 credentials.json 提供 Token。"
             )
 
-        # 1. 获取或创建会话
-        session_id = await session_manager.get_or_create_session(self.client, request.chat_session_id)
+        # 1. 确定当前请求绑定的 Token (会话亲和性：若存在历史会话则复用对应账号，否则从 Token 池轮询健康 Token)
+        active_token: Optional[str] = None
+        if request.chat_session_id:
+            active_token = session_manager.get_session_token(request.chat_session_id)
+        if not active_token:
+            active_token = credentials_manager.get_token("deepseek", rotate=True)
+
+        if not active_token:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="DeepSeek 所有可用 Token 均处于冷却或不可用状态。"
+            )
+
+        # 2. 获取或创建会话 (锁定 active_token)
+        session_id = await session_manager.get_or_create_session(
+            self.client, request.chat_session_id, token=active_token
+        )
         
-        # 2. 确定 parent_message_id
+        # 3. 确定 parent_message_id
         parent_msg_id = request.parent_message_id
         if parent_msg_id is None:
             parent_msg_id = session_manager.get_parent_message_id(session_id)
 
-        # 3. 确定模型参数
+        # 4. 确定模型参数
         model_type, thinking_enabled, search_enabled = self.resolve_model_params(
             request.model, request.thinking_enabled, request.search_enabled
         )
 
-        # 4. 计算 PoW challenge
+        # 5. 计算 PoW challenge (传入匹配的 active_token)
         target_path = "/api/v0/chat/completion"
         try:
-            pow_header = await pow_solver.get_pow_header(self.client, target_path)
+            pow_header = await pow_solver.get_pow_header(self.client, target_path, token=active_token)
         except Exception as e:
-            logger.error(f"计算 PoW 挑战失败: {e}")
+            logger.error(f"计算 PoW 挑战失败 (Token: ***{active_token[-6:]}): {e}")
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail=f"求解 DeepSeek Proof-of-Work 失败: {str(e)}"
@@ -167,7 +182,7 @@ class DeepSeekClient:
 
         headers = {
             "accept": "*/*",
-            "authorization": credentials_manager.auth_header,
+            "authorization": f"Bearer {active_token}",
             "content-type": "application/json",
             "sec-ch-ua": '"Not=A?Brand";v="99", "Google Chrome";v="133", "Chromium";v="133"',
             "sec-ch-ua-mobile": "?0",
@@ -182,11 +197,11 @@ class DeepSeekClient:
             "user-agent": settings.USER_AGENT,
         }
 
-        # 4.1. 针对视觉多模态的特殊处理
+        # 5.1. 针对视觉多模态的特殊处理
         if request.ref_file_ids or model_type == "vision":
             model_type = "vision"
             search_enabled = False  # DeepSeek 网页端存在文件时禁用搜索
-            token = credentials_manager.get_token("deepseek")
+            token = active_token
             if token:
                 try:
                     from app.services.hif_provider import hif_provider
@@ -220,7 +235,23 @@ class DeepSeekClient:
             if resp.status_code != 200:
                 body = await resp.aread()
                 err_text = body.decode("utf-8", errors="replace")
-                logger.error(f"DeepSeek 返回错误状态码 {resp.status_code}: {err_text}")
+                masked_tok = f"{active_token[:6]}...{active_token[-4:]}" if len(active_token) > 10 else "***"
+                logger.error(f"DeepSeek [Token: {masked_tok}] 返回错误状态码 {resp.status_code}: {err_text}")
+
+                lower_err = err_text.lower()
+                if resp.status_code in [401, 403] or "已被禁言" in err_text or "规范" in err_text or "authorization failed" in lower_err:
+                    credentials_manager.mark_token_status(
+                        "deepseek", active_token, cooldown_seconds=86400, error=f"HTTP {resp.status_code}: {err_text[:120]}"
+                    )
+                    logger.warning(f"Token [{masked_tok}] 触发官方封禁/鉴权失败，已自动隔离冷却 24 小时")
+                elif resp.status_code == 429 or "too many" in lower_err or "频繁" in err_text:
+                    credentials_manager.mark_token_status(
+                        "deepseek", active_token, cooldown_seconds=60, error="HTTP 429 Too Many Requests"
+                    )
+                    logger.warning(f"Token [{masked_tok}] 触发频率限制 (429)，已自动冷却 60 秒")
+                else:
+                    credentials_manager.mark_token_status("deepseek", active_token, error=f"HTTP {resp.status_code}")
+
                 if resp.status_code in [400, 404] or "session" in err_text.lower():
                     session_manager.invalidate_current_session()
                 raise HTTPException(
@@ -238,6 +269,7 @@ class DeepSeekClient:
         finally:
             if last_message_id:
                 session_manager.update_session_state(session_id, last_message_id, extracted_title)
+                credentials_manager.mark_token_status("deepseek", active_token, is_success=True)
 
     async def send_message(
         self,

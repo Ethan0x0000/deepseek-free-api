@@ -15,6 +15,8 @@ class ProviderRegistry:
     def __init__(self):
         self._providers: Dict[str, BaseLLMProvider] = {}
         self.default_provider_id: str = "deepseek"
+        # 预注册基础提供商实例 (使用默认 Client，FastAPI lifespan 启动后会用共享 Client 重新覆盖)
+        self.init_providers(httpx.AsyncClient())
 
     def init_providers(self, http_client: httpx.AsyncClient) -> None:
         """初始化可用提供商及其共享 HTTP 客户端。"""
