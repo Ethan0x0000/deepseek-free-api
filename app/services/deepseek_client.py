@@ -22,9 +22,17 @@ logger = logging.getLogger(__name__)
 
 AVAILABLE_MODELS = [
     ModelInfo(
+        id="deepseek-flash",
+        name="DeepSeek Flash",
+        description="DeepSeek 超高速多模态全能模型，原生支持极速对话、多模态识图、深度思考与实时联网搜索。",
+        model_type="default",
+        supports_thinking=True,
+        supports_search=True,
+    ),
+    ModelInfo(
         id="deepseek-v4.1-flash",
-        name="DeepSeek V4.1 Flash (Unified)",
-        description="DeepSeek 2026年9月全新三合一统一多模态模型，原生融合极速文本、深度思考、联网搜索与图像视觉理解。",
+        name="DeepSeek V4.1 Flash",
+        description="DeepSeek V4.1 统一多模态模型，低延迟高吞吐，支持高频 Agent 编码、深度思考与看图分析。",
         model_type="default",
         supports_thinking=True,
         supports_search=True,
@@ -32,26 +40,10 @@ AVAILABLE_MODELS = [
     ModelInfo(
         id="deepseek-v4-pro",
         name="DeepSeek V4 Pro",
-        description="1.6T MoE 旗舰模型 (49B 激活参数)，专为复杂编程、代码重构、数学与深度推理优化。",
+        description="1.6T MoE 旗舰推理模型 (49B 激活参数)，专为复杂编程、代码重构、数学与深度推理优化。",
         model_type="expert",
         supports_thinking=True,
         supports_search=False,
-    ),
-    ModelInfo(
-        id="deepseek-v4-flash",
-        name="DeepSeek V4 Flash",
-        description="284B MoE 超高速模型 (13B 激活参数)，低延迟快速响应，适合轻量级任务与高频调用。",
-        model_type="default",
-        supports_thinking=True,
-        supports_search=True,
-    ),
-    ModelInfo(
-        id="deepseek-v4-flash-vision-exp",
-        name="DeepSeek V4 Flash Vision",
-        description="DeepSeek V4 视觉多模态模型，支持图片理解、图表识别与视觉代码分析。",
-        model_type="default",
-        supports_thinking=True,
-        supports_search=True,
     ),
     ModelInfo(
         id="deepseek-reasoner",
@@ -110,16 +102,16 @@ class DeepSeekClient:
             model_type = "default"
             think = True if thinking_enabled is None else thinking_enabled
             search = search_enabled if search_enabled is not None else False
+        elif model_lower in ["deepseek-flash", "deepseek-v4-flash", "v4-flash", "flash"]:
+            model_type = "default"
+            think = True if thinking_enabled is None else thinking_enabled
+            search = search_enabled if search_enabled is not None else False
         elif model_lower in ["deepseek-v4-pro", "v4-pro", "v4", "deepseek-v4", "pro"]:
             model_type = "expert"
             think = True if thinking_enabled is None else thinking_enabled
             search = search_enabled if search_enabled is not None else False
-        elif model_lower in ["deepseek-v4-flash", "v4-flash", "flash"]:
-            model_type = "default"
-            think = True if thinking_enabled is None else thinking_enabled
-            search = search_enabled if search_enabled is not None else False
         elif model_lower in ["deepseek-v4-flash-vision-exp", "v4-vision", "vision", "deepseek-vision"]:
-            # 新版统一支持 default 多模态
+            # 兼容历史 vision 标识，自动映射到默认多模态模型
             model_type = "default"
             think = True if thinking_enabled is None else thinking_enabled
             search = search_enabled if search_enabled is not None else False

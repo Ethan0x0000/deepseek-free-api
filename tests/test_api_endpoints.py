@@ -33,8 +33,9 @@ async def test_models_endpoints():
         oai_data = oai_resp.json()
         assert oai_data["object"] == "list"
         model_names = [m["id"] for m in oai_data["data"]]
+        assert "deepseek-flash" in model_names
+        assert "deepseek-v4.1-flash" in model_names
         assert "deepseek-v4-pro" in model_names
-        assert "deepseek-v4-flash" in model_names
         assert len(oai_data["data"]) >= 5
 
 

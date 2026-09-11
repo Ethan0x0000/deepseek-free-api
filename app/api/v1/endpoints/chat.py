@@ -202,7 +202,7 @@ async def openai_chat_completions(
     model_to_use = request.model
     if vision_file_ids and model_to_use in ["deepseek-chat", "deepseek"]:
         # 新版统一架构：默认模型原生支持多模态识图，兼容旧版指定
-        model_to_use = "deepseek-v4-flash-vision-exp"
+        model_to_use = "deepseek-flash"
 
     deepseek_req = DeepSeekChatRequest(
         prompt=compiled_prompt,
