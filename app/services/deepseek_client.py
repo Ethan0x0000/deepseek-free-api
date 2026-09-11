@@ -22,6 +22,14 @@ logger = logging.getLogger(__name__)
 
 AVAILABLE_MODELS = [
     ModelInfo(
+        id="deepseek-v4.1-flash",
+        name="DeepSeek V4.1 Flash (Unified)",
+        description="DeepSeek 2026年9月全新三合一统一多模态模型，原生融合极速文本、深度思考、联网搜索与图像视觉理解。",
+        model_type="default",
+        supports_thinking=True,
+        supports_search=True,
+    ),
+    ModelInfo(
         id="deepseek-v4-pro",
         name="DeepSeek V4 Pro",
         description="1.6T MoE 旗舰模型 (49B 激活参数)，专为复杂编程、代码重构、数学与深度推理优化。",
@@ -34,39 +42,39 @@ AVAILABLE_MODELS = [
         name="DeepSeek V4 Flash",
         description="284B MoE 超高速模型 (13B 激活参数)，低延迟快速响应，适合轻量级任务与高频调用。",
         model_type="default",
-        supports_thinking=False,
+        supports_thinking=True,
         supports_search=True,
     ),
     ModelInfo(
         id="deepseek-v4-flash-vision-exp",
         name="DeepSeek V4 Flash Vision",
         description="DeepSeek V4 视觉多模态模型，支持图片理解、图表识别与视觉代码分析。",
-        model_type="vision",
-        supports_thinking=False,
+        model_type="default",
+        supports_thinking=True,
         supports_search=True,
     ),
     ModelInfo(
         id="deepseek-reasoner",
         name="DeepSeek R1 (Reasoner)",
         description="DeepSeek-R1 深度思考推理模型，提供完整的思维链推理过程输出。",
-        model_type="expert",
+        model_type="default",
         supports_thinking=True,
-        supports_search=False,
+        supports_search=True,
     ),
     ModelInfo(
         id="deepseek-chat",
         name="DeepSeek V3",
-        description="DeepSeek V3 通用对话模型 (专家模式)。",
-        model_type="expert",
+        description="DeepSeek 通用对话模型 (默认统一智能模式)。",
+        model_type="default",
         supports_thinking=True,
-        supports_search=False,
+        supports_search=True,
     ),
     ModelInfo(
         id="deepseek-search",
         name="DeepSeek V3 (Search)",
         description="内置实时联网搜索增强的 DeepSeek 对话模型。",
         model_type="default",
-        supports_thinking=False,
+        supports_thinking=True,
         supports_search=True,
     ),
 ]
@@ -97,17 +105,22 @@ class DeepSeekClient:
         """解析并返回内部 model_type 以及 thinking / search 标志。默认开启思维链。"""
         model_lower = model_name.lower().strip()
 
-        # 1. DeepSeek V4 系列
-        if model_lower in ["deepseek-v4-pro", "v4-pro", "v4", "deepseek-v4", "pro"]:
+        # 1. DeepSeek V4 / V4.1 系列
+        if model_lower in ["deepseek-v4.1", "deepseek-v4.1-flash", "v4.1", "v4.1-flash"]:
+            model_type = "default"
+            think = True if thinking_enabled is None else thinking_enabled
+            search = search_enabled if search_enabled is not None else False
+        elif model_lower in ["deepseek-v4-pro", "v4-pro", "v4", "deepseek-v4", "pro"]:
             model_type = "expert"
             think = True if thinking_enabled is None else thinking_enabled
-            search = False
+            search = search_enabled if search_enabled is not None else False
         elif model_lower in ["deepseek-v4-flash", "v4-flash", "flash"]:
             model_type = "default"
             think = True if thinking_enabled is None else thinking_enabled
             search = search_enabled if search_enabled is not None else False
         elif model_lower in ["deepseek-v4-flash-vision-exp", "v4-vision", "vision", "deepseek-vision"]:
-            model_type = "vision"
+            # 新版统一支持 default 多模态
+            model_type = "default"
             think = True if thinking_enabled is None else thinking_enabled
             search = search_enabled if search_enabled is not None else False
 
@@ -119,15 +132,15 @@ class DeepSeekClient:
 
         # 3. 推理模型 (DeepSeek-R1)
         elif thinking_enabled is True or model_lower in ["deepseek-reasoner", "r1", "reasoner", "deepseek_reasoner"]:
-            model_type = "expert"
+            model_type = "default"
             think = True
-            search = False
+            search = search_enabled if search_enabled is not None else False
 
         # 4. 默认通用对话
         else:
-            model_type = "expert"
+            model_type = "default"
             think = True if thinking_enabled is None else thinking_enabled
-            search = False
+            search = search_enabled if search_enabled is not None else False
 
         return model_type, think, search
 
@@ -207,10 +220,13 @@ class DeepSeekClient:
                 "user-agent": settings.USER_AGENT,
             }
 
-            # 5.1. 针对视觉多模态的特殊处理
+            # 5.1. 针对多模态与视觉处理 (新版 V4.1 统一模型支持 default 原生多模态及看图联网搜索)
+            if model_type == "vision":
+                search_enabled = False
+            elif request.ref_file_ids:
+                model_type = "default"
+
             if request.ref_file_ids or model_type == "vision":
-                model_type = "vision"
-                search_enabled = False  # DeepSeek 网页端存在文件时禁用搜索
                 token = active_token
                 if token:
                     try:

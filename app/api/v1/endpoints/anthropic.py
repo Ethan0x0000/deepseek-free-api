@@ -75,7 +75,8 @@ async def anthropic_messages(
 
     if vision_file_ids:
         deepseek_req.ref_file_ids = vision_file_ids
-        deepseek_req.model = "deepseek-v4-flash-vision-exp"
+        if deepseek_req.model in ["deepseek-chat", "deepseek"]:
+            deepseek_req.model = "deepseek-v4-flash-vision-exp"
 
     deepseek_req.active_token = active_token
 

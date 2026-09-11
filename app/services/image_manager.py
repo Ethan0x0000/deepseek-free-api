@@ -198,15 +198,23 @@ class ImageManager:
                 if poll_resp.status_code == 200:
                     files_list = poll_resp.json().get("data", {}).get("biz_data", {}).get("files", [])
                     if files_list:
-                        status = files_list[0].get("status", "").upper()
-                        if status == "SUCCESS" or status == "CONTENT_EMPTY":
+                        f_info = files_list[0]
+                        status = f_info.get("status", "").upper()
+                        model_kind = f_info.get("model_kind", "").upper()
+                        # 新版 DeepSeek 三合一模型：上传图片时自动打标 model_kind=VISION
+                        # 当 status 为 SUCCESS 时直接就绪，无需也不应再调用 fork_file_task
+                        if status == "SUCCESS":
+                            logger.info(f"✓ Image file {raw_file_id} is ready for inference (model_kind: {model_kind or 'DEFAULT'})!")
+                            self._cache[cache_key] = raw_file_id
+                            return raw_file_id
+                        if status == "CONTENT_EMPTY":
                             # Ready for forking (CONTENT_EMPTY is normal for pure binary images before OCR)
                             break
                         if status in ["FAILED", "ERROR"]:
-                            err_code = files_list[0].get("error_code")
+                            err_code = f_info.get("error_code")
                             raise RuntimeError(f"File upload parsing failed: {status} (error_code: {err_code})")
 
-            # Step 3: Fork to Vision
+            # Step 3: Fork to Vision (旧版兼容回退)
             logger.info(f"Forking file {raw_file_id} to vision model...")
             fork_headers = {
                 **status_headers,
@@ -223,14 +231,20 @@ class ImageManager:
                 raise RuntimeError(f"Fork to vision failed HTTP {fork_resp.status_code}: {fork_resp.text[:200]}")
 
             fork_data = fork_resp.json() or {}
+            fork_data_obj = fork_data.get("data") or {}
+            fork_biz_msg = str(fork_data_obj.get("biz_msg", "")).lower()
+
+            # 如果官方提示 model kind satisfied，说明无需 fork，直接使用原 file_id
+            if "model kind satisfied" in fork_biz_msg or fork_data_obj.get("biz_code") == 2:
+                logger.info(f"✓ Model kind already satisfied for {raw_file_id}, using raw_file_id directly.")
+                self._cache[cache_key] = raw_file_id
+                return raw_file_id
+
             if fork_data.get("code") != 0:
                 raise RuntimeError(f"Fork to vision rejected: {fork_data}")
 
-            fork_data_obj = fork_data.get("data") or {}
             fork_biz = fork_data_obj.get("biz_data") or {}
-            vision_file_id = fork_biz.get("id")
-            if not vision_file_id:
-                raise RuntimeError(f"Fork to vision response missing id: {fork_data}")
+            vision_file_id = fork_biz.get("id") or raw_file_id
             logger.info(f"Forked to vision, vision_file_id: {vision_file_id}")
 
             # Step 4: Poll vision file until SUCCESS (up to 25s)
