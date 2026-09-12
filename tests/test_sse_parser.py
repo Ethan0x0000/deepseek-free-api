@@ -151,3 +151,30 @@ async def test_sse_parser_hint_error():
     error_chunks = [c for c in chunks if c.type == "error"]
     assert len(error_chunks) == 1
     assert "input_exceeds_limit" in error_chunks[0].text or "Text too long" in error_chunks[0].text
+
+
+@pytest.mark.asyncio
+async def test_sse_parser_batch_multipart_never_drops():
+    """测试当单条 BATCH 操作中包含多个 content/thinking 补丁时，所有分块均被完整保留而不被截断吞没。"""
+    lines = [
+        'event: ready',
+        'data: {"request_message_id":1,"response_message_id":2,"model_type":"expert"}',
+        'data: {"p":"response","o":"BATCH","v":[{"p":"response/fragments/1/content","o":"APPEND","v":"git checkout --orphan main; git rm -r --cached . > "},{"p":"response/fragments/1/content","o":"APPEND","v":"/dev/null 2>&1; git add -A"}]}',
+        'data: {"p":"response/status","o":"SET","v":"FINISHED"}',
+        'event: close',
+        'data: {}',
+    ]
+
+    async def gen_lines():
+        for l in lines:
+            yield l
+
+    chunks = []
+    async for chunk in parse_sse_lines(gen_lines(), session_id="test-session"):
+        if chunk.type == "content":
+            chunks.append(chunk.text)
+
+    full_output = "".join(chunks)
+    # 验证前序的 "git checkout... > " 没有被丢失，后序的 "/dev/null..." 紧密衔接
+    assert "git checkout --orphan main; git rm -r --cached . > /dev/null 2>&1; git add -A" == full_output
+    assert len(chunks) == 2

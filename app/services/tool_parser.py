@@ -222,6 +222,22 @@ def format_messages_to_prompt(
                 for tc in msg.tool_calls:
                     fn_name = tc.function.name
                     fn_args = tc.function.arguments
+                    try:
+                        parsed_args = json.loads(fn_args) if isinstance(fn_args, str) else fn_args
+                        while isinstance(parsed_args, dict) and len(parsed_args) == 1 and any(k in parsed_args for k in ["arguments", "parameters", "input"]):
+                            nested = list(parsed_args.values())[0]
+                            if isinstance(nested, dict):
+                                parsed_args = nested
+                            elif isinstance(nested, str):
+                                try:
+                                    parsed_args = json.loads(nested)
+                                except Exception:
+                                    break
+                            else:
+                                break
+                        fn_args = json.dumps(parsed_args, ensure_ascii=False) if isinstance(parsed_args, dict) else str(fn_args)
+                    except Exception:
+                        pass
                     tc_str += f"\n<tool_call>\n{{\"name\": \"{fn_name}\", \"arguments\": {fn_args}}}\n</tool_call>"
                 history_messages.append(f"Assistant: {content}{tc_str}")
             else:
@@ -459,6 +475,10 @@ def _parse_broken_arguments(args_str: str) -> Dict[str, Any]:
         if raw_val.endswith(","):
             raw_val = raw_val[:-1].strip()
 
+        # 清理由于多层闭合失衡导致的多余尾随反花括号 (例如 300000}})
+        while raw_val.endswith("}") and raw_val.count("}") > raw_val.count("{"):
+            raw_val = raw_val[:-1].strip()
+
         has_quotes = False
         if raw_val.startswith('"') and raw_val.endswith('"') and len(raw_val) >= 2:
             raw_val = raw_val[1:-1]
@@ -502,10 +522,9 @@ def _parse_all_tool_json(raw_json: str, default_name: Optional[str] = None) -> L
             if isinstance(obj, dict):
                 name = obj.get("name") or obj.get("function") or default_name
                 args = obj.get("arguments") or obj.get("parameters") or obj.get("input")
-                if args is None and default_name and name == default_name:
-                    args = {k: v for k, v in obj.items() if k not in ["name", "function"]}
-                elif args is None:
-                    args = {}
+                # 兼容扁平结构: {"name": "bash", "command": "...", "timeout": 120000}
+                if args is None:
+                    args = {k: v for k, v in obj.items() if k not in ["name", "function", "type", "id"]}
                 if name:
                     args_str = json.dumps(args, ensure_ascii=False) if isinstance(args, dict) else str(args)
                     results.append((str(name).strip(), args_str))
@@ -524,10 +543,8 @@ def _parse_all_tool_json(raw_json: str, default_name: Optional[str] = None) -> L
             if isinstance(data, dict):
                 name = data.get("name") or data.get("function") or default_name
                 args = data.get("arguments") or data.get("parameters") or data.get("input")
-                if args is None and default_name and name == default_name:
-                    args = {k: v for k, v in data.items() if k not in ["name", "function"]}
-                elif args is None:
-                    args = {}
+                if args is None:
+                    args = {k: v for k, v in data.items() if k not in ["name", "function", "type", "id"]}
                 if name:
                     args_str = json.dumps(args, ensure_ascii=False) if isinstance(args, dict) else str(args)
                     results.append((str(name).strip(), args_str))
@@ -542,10 +559,8 @@ def _parse_all_tool_json(raw_json: str, default_name: Optional[str] = None) -> L
             if isinstance(data, dict):
                 name = data.get("name") or data.get("function") or default_name
                 args = data.get("arguments") or data.get("parameters") or data.get("input")
-                if args is None and default_name and name == default_name:
-                    args = {k: v for k, v in data.items() if k not in ["name", "function"]}
-                elif args is None:
-                    args = {}
+                if args is None:
+                    args = {k: v for k, v in data.items() if k not in ["name", "function", "type", "id"]}
                 if name:
                     args_str = json.dumps(args, ensure_ascii=False) if isinstance(args, dict) else str(args)
                     results.append((str(name).strip(), args_str))
@@ -620,6 +635,24 @@ def extract_tool_calls(
                 args_dict = _parse_broken_arguments(args_input) if args_input else {}
         else:
             args_dict = {}
+
+        # 核心防线：递归解包被嵌套包裹在 arguments/parameters/input 内的参数 (无论内层是 dict 还是序列化 JSON 字符串)
+        while len(args_dict) == 1 and any(k in args_dict for k in ["arguments", "parameters", "input"]):
+            nested = list(args_dict.values())[0]
+            if isinstance(nested, dict):
+                args_dict = nested
+            elif isinstance(nested, str):
+                try:
+                    p = json.loads(nested, strict=False)
+                    if isinstance(p, dict):
+                        args_dict = p
+                    else:
+                        args_dict = _parse_broken_arguments(nested)
+                except Exception:
+                    args_dict = _parse_broken_arguments(nested)
+                break
+            else:
+                break
 
         # 依据 Schema 进行类型自动矫正 (Coercion)，如将 "300000" 纠正为数值 300000
         schema = tools_schemas.get(name) if tools_schemas else None

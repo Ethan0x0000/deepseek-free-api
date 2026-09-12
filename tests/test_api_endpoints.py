@@ -208,6 +208,27 @@ async def test_tool_type_coercion_and_error_recovery():
     assert "SchemaError" in compiled
     assert "correct your argument values and types" in compiled
 
+    # 5. 真实故障场景测试：模型将 arguments 序列化并包裹在 arguments 键内
+    nested_json = """<tool_call>
+{"name": "bash", "arguments": "{\\"command\\": \\"cd ~/Projects/wflow-core; pnpm test\\", \\"timeout\\": 300000}"}
+</tool_call>"""
+    _, tools5 = extract_tool_calls(nested_json, tools_schemas=tools_schemas)
+    assert len(tools5) == 1
+    args5 = json.loads(tools5[0].function.arguments)
+    assert "command" in args5
+    assert args5["command"] == "cd ~/Projects/wflow-core; pnpm test"
+    assert args5["timeout"] == 300000
+
+    # 6. 真实故障场景测试：模型输出扁平 JSON 结构 (无 arguments 包装外壳)
+    flat_json = """<tool_call>
+{"name": "bash", "command": "git status --short", "timeout": 60000}
+</tool_call>"""
+    _, tools6 = extract_tool_calls(flat_json, tools_schemas=tools_schemas)
+    assert len(tools6) == 1
+    args6 = json.loads(tools6[0].function.arguments)
+    assert args6["command"] == "git status --short"
+    assert args6["timeout"] == 60000
+
 
 @pytest.mark.asyncio
 async def test_auth_token_set(monkeypatch, tmp_path):
