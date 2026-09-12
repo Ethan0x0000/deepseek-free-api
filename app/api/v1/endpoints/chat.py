@@ -243,10 +243,13 @@ async def openai_chat_completions(
             sessions_to_clean: set = set()
             has_tools = bool(request.tools)
             active_provider = provider
-            # tools 模式滑动窗口缓冲：避免将 <tool_call> 标签碎片过早泄露给客户端
+            # tools 模式滑动窗口缓冲：避免将 <tool_call> / DSML 标签碎片过早泄露给客户端
             pending_tail = ""
             pending_thinking_tail = ""
-            TOOL_OPEN_PAT = re.compile(r"<[｜\|]*\s*(?:tool_calls?|function_calls?|invoke|DSML|tool)\b", re.IGNORECASE)
+            TOOL_OPEN_PAT = re.compile(
+                r"<[｜\|]*\s*(?:tool_calls?|function_calls?|invoke|DSML|calls|tool)\b|<[｜\|]+\s*DSML|\[(?:tool_call|invoke)",
+                re.IGNORECASE,
+            )
 
             def flush_live_content(text_piece: str) -> str:
                 """保留滑动尾部，安全释放正文内容"""
@@ -257,14 +260,19 @@ async def openai_chat_completions(
                     safe = pending_tail[: m.start()]
                     pending_tail = pending_tail[m.start():]
                     return safe
-                hold = 12
+                last_lt = pending_tail.rfind("<")
+                if last_lt != -1 and ">" not in pending_tail[last_lt:]:
+                    safe = pending_tail[:last_lt]
+                    pending_tail = pending_tail[last_lt:]
+                    return safe
+                hold = 32
                 cut = len(pending_tail) - hold if len(pending_tail) > hold else 0
                 safe = pending_tail[:cut]
                 pending_tail = pending_tail[cut:]
                 return safe
 
             def flush_live_thinking(text_piece: str) -> str:
-                """保留滑动尾部，避免将 thinking 阶段意外出现的 <tool_call> 标签碎片泄露给客户端 reasoning_content"""
+                """保留滑动尾部，避免将 thinking 阶段意外出现的 <tool_call> / DSML 标签碎片泄露给客户端 reasoning_content"""
                 nonlocal pending_thinking_tail
                 pending_thinking_tail += text_piece
                 m = TOOL_OPEN_PAT.search(pending_thinking_tail)
@@ -272,7 +280,12 @@ async def openai_chat_completions(
                     safe = pending_thinking_tail[: m.start()]
                     pending_thinking_tail = pending_thinking_tail[m.start():]
                     return safe
-                hold = 12
+                last_lt = pending_thinking_tail.rfind("<")
+                if last_lt != -1 and ">" not in pending_thinking_tail[last_lt:]:
+                    safe = pending_thinking_tail[:last_lt]
+                    pending_thinking_tail = pending_thinking_tail[last_lt:]
+                    return safe
+                hold = 32
                 cut = len(pending_thinking_tail) - hold if len(pending_thinking_tail) > hold else 0
                 safe = pending_thinking_tail[:cut]
                 pending_thinking_tail = pending_thinking_tail[cut:]
@@ -387,15 +400,32 @@ async def openai_chat_completions(
                     sessions_to_clean.add(active_session_id)
 
                 allowed_tool_names = {t.function.name for t in (request.tools or []) if t.function} if request.tools else None
+                tools_schemas = {
+                    t.function.name: (t.function.parameters or {})
+                    for t in (request.tools or [])
+                    if t.function and t.function.name
+                } if request.tools else None
 
                 if has_tools:
-                    clean_text, tool_calls = extract_tool_calls(full_text, allowed_tool_names=allowed_tool_names)
-                    clean_prefix = re.split(r'<[｜\|]*\s*(?:DSML\s*[｜\|]*)?tool_calls?[^>]*>', full_text)[0].strip()
+                    clean_text, tool_calls = extract_tool_calls(
+                        full_text,
+                        allowed_tool_names=allowed_tool_names,
+                        tools_schemas=tools_schemas,
+                    )
+                    clean_prefix = re.split(
+                        r'<[｜\|]*\s*(?:DSML\s*[｜\|]*\s*)?(?:tool_calls?|calls|function_calls?|invoke|tool)\b[^>]*>',
+                        full_text,
+                        flags=re.IGNORECASE,
+                    )[0].strip()
 
                     # ── 核心防御：如果在正文中没有提取到工具调用，检查 thinking 思考链中是否误包含了工具调用 ──
                     if not tool_calls and accumulated_thinking:
                         thinking_full = "".join(accumulated_thinking)
-                        thinking_clean, thinking_tools = extract_tool_calls(thinking_full, allowed_tool_names=allowed_tool_names)
+                        thinking_clean, thinking_tools = extract_tool_calls(
+                            thinking_full,
+                            allowed_tool_names=allowed_tool_names,
+                            tools_schemas=tools_schemas,
+                        )
                         if thinking_tools:
                             logger.warning(f"检测到模型将 {len(thinking_tools)} 个工具调用误输出在 Thinking 思考阶段，已自动拦截并提升为正式 Tool Call！")
                             tool_calls = thinking_tools
@@ -405,8 +435,8 @@ async def openai_chat_completions(
                     # 仅在模型确实有未闭合的 tool_call 标签或表达了行动意图但未输出工具时触发，避免纯 Markdown 解释误触发
                     has_unclosed_tool = (
                         ("<tool_call" in full_text and "</tool_call" not in full_text)
-                        or ("<invoke" in full_text and "</invoke" not in full_text)
-                        or ("DSML" in full_text and "invoke" in full_text and ("</invoke" not in full_text and "</｜DSML｜" not in full_text))
+                        or ("<invoke" in full_text and "</invoke" not in full_text and "</｜｜DSML｜｜" not in full_text and "</|DSML|" not in full_text)
+                        or ("DSML" in full_text and "invoke" in full_text and ("</invoke" not in full_text and "</｜｜DSML｜｜" not in full_text and "</|DSML|" not in full_text and "</｜DSML｜" not in full_text))
                     )
                     if not tool_calls and (INTENT_PAT.search(full_text) or has_unclosed_tool):
                         logger.info("检测到行动意图声明或未闭合 tool_call，启动自动补全 (Continuation Recovery)...")
@@ -429,7 +459,11 @@ async def openai_chat_completions(
                             if getattr(cont_resp, "session_id", None):
                                 sessions_to_clean.add(cont_resp.session_id)
                             logger.info(f"Continuation 响应内容: {cont_resp.content!r}")
-                            cont_clean, cont_tools = extract_tool_calls(cont_resp.content, allowed_tool_names=allowed_tool_names)
+                            cont_clean, cont_tools = extract_tool_calls(
+                                cont_resp.content,
+                                allowed_tool_names=allowed_tool_names,
+                                tools_schemas=tools_schemas,
+                            )
                             if cont_tools:
                                 tool_calls = cont_tools
                                 if cont_clean:
@@ -585,14 +619,31 @@ async def openai_chat_completions(
                 sessions_to_clean.add(resp.session_id)
 
             allowed_tool_names = {t.function.name for t in (request.tools or []) if t.function} if request.tools else None
+            tools_schemas = {
+                t.function.name: (t.function.parameters or {})
+                for t in (request.tools or [])
+                if t.function and t.function.name
+            } if request.tools else None
 
             if request.tools:
-                clean_text, found_tool_calls = extract_tool_calls(resp.content, allowed_tool_names=allowed_tool_names)
-                clean_prefix = re.split(r'<[｜\|]*\s*(?:DSML\s*[｜\|]*)?tool_calls?[^>]*>', resp.content)[0].strip()
+                clean_text, found_tool_calls = extract_tool_calls(
+                    resp.content,
+                    allowed_tool_names=allowed_tool_names,
+                    tools_schemas=tools_schemas,
+                )
+                clean_prefix = re.split(
+                    r'<[｜\|]*\s*(?:DSML\s*[｜\|]*\s*)?(?:tool_calls?|calls|function_calls?|invoke|tool)\b[^>]*>',
+                    resp.content,
+                    flags=re.IGNORECASE,
+                )[0].strip()
 
                 # ── 核心防御：如果在正文中没有提取到工具调用，检查 thinking 中是否误包含了工具调用 ──
                 if not found_tool_calls and getattr(resp, "thinking", None):
-                    thinking_clean, thinking_tools = extract_tool_calls(resp.thinking, allowed_tool_names=allowed_tool_names)
+                    thinking_clean, thinking_tools = extract_tool_calls(
+                        resp.thinking,
+                        allowed_tool_names=allowed_tool_names,
+                        tools_schemas=tools_schemas,
+                    )
                     if thinking_tools:
                         logger.warning(f"Non-streaming: 检测到模型将 {len(thinking_tools)} 个工具调用误输出在 Thinking 思考阶段，已自动拦截并提升为正式 Tool Call！")
                         found_tool_calls = thinking_tools
@@ -601,8 +652,8 @@ async def openai_chat_completions(
 
                 has_unclosed_tool = (
                     ("<tool_call" in resp.content and "</tool_call" not in resp.content)
-                    or ("<invoke" in resp.content and "</invoke" not in resp.content)
-                    or ("DSML" in resp.content and "invoke" in resp.content and ("</invoke" not in resp.content and "</｜DSML｜" not in resp.content))
+                    or ("<invoke" in resp.content and "</invoke" not in resp.content and "</｜｜DSML｜｜" not in resp.content and "</|DSML|" not in resp.content)
+                    or ("DSML" in resp.content and "invoke" in resp.content and ("</invoke" not in resp.content and "</｜｜DSML｜｜" not in resp.content and "</|DSML|" not in resp.content and "</｜DSML｜" not in resp.content))
                 )
                 if not found_tool_calls and (INTENT_PAT.search(resp.content) or has_unclosed_tool):
                     logger.info("Non-streaming: 检测到行动意图声明或未闭合 tool_call，启动自动补全...")
@@ -624,7 +675,11 @@ async def openai_chat_completions(
                         cont_resp = await asyncio.wait_for(provider.send_message(cont_req), timeout=15.0)
                         if getattr(cont_resp, "session_id", None):
                             sessions_to_clean.add(cont_resp.session_id)
-                        cont_clean, cont_tools = extract_tool_calls(cont_resp.content, allowed_tool_names=allowed_tool_names)
+                        cont_clean, cont_tools = extract_tool_calls(
+                            cont_resp.content,
+                            allowed_tool_names=allowed_tool_names,
+                            tools_schemas=tools_schemas,
+                        )
                         if cont_tools:
                             found_tool_calls = cont_tools
                             if cont_clean:

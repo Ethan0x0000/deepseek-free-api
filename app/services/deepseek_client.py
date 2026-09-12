@@ -309,6 +309,12 @@ class DeepSeekClient:
                             "deepseek", active_token, cooldown_seconds=cooldown, error=f"官方禁言: {biz_msg} (直至 {mute_until})"
                         )
                         logger.warning(f"Token [{masked_tok}] 处于官方禁言状态，已自动隔离冷却 {int(cooldown)} 秒")
+                    elif "parallel_chat_limit" in str(biz_msg).lower() or "being generated" in str(biz_msg).lower() or "正在生成" in str(biz_msg):
+                        # 官方单 Token 并发限制：仅短暂隔离 3 秒，自动轮转故障转移至其他空闲 Token
+                        credentials_manager.mark_token_status("deepseek", active_token, cooldown_seconds=3, error=f"并发限制: {biz_msg}")
+                        logger.warning(f"Token [{masked_tok}] 触发官方并发限制 (parallel_chat_limit)，隔离 3s 并自动 Failover 到空闲 Token...")
+                        import asyncio
+                        await asyncio.sleep(0.6)
                     else:
                         credentials_manager.mark_token_status("deepseek", active_token, cooldown_seconds=60, error=f"业务错误: {biz_msg}")
 
@@ -327,6 +333,8 @@ class DeepSeekClient:
                         err_lower = chunk.text.lower()
                         if "muted" in err_lower or "禁言" in chunk.text:
                             credentials_manager.mark_token_status("deepseek", active_token, cooldown_seconds=86400, error=chunk.text)
+                        elif "parallel_chat_limit" in err_lower or "being generated" in err_lower:
+                            credentials_manager.mark_token_status("deepseek", active_token, cooldown_seconds=3, error=chunk.text)
                         elif "too many" in err_lower or "频繁" in chunk.text or "frequent" in err_lower or "rate_limit" in err_lower:
                             if not chunk_streamed:
                                 rate_limited_early = True

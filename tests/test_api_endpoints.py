@@ -75,6 +75,141 @@ async def test_tool_parser_extraction():
 
 
 @pytest.mark.asyncio
+async def test_native_dsml_extraction_suite():
+    """全面测试 DeepSeek 最新基座模型的原生 DSML 工具调用解析能力。"""
+    from app.services.tool_parser import extract_tool_calls
+
+    # Case 1: 真实 OpenCode 会话中触发的原生全角 DSML 格式
+    opencode_session_text = """我来为您查询明天南昌市红谷滩区的天气情况。
+<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="bash">
+<｜｜DSML｜｜ parameter name="command" string="true">curl -s "https://wttr.in/Nanchang?format=j1" | head -c 4000</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+</｜｜DSML｜｜ calls>"""
+
+    clean, tools = extract_tool_calls(opencode_session_text)
+    assert clean == "我来为您查询明天南昌市红谷滩区的天气情况。"
+    assert len(tools) == 1
+    assert tools[0].function.name == "bash"
+    assert "https://wttr.in/Nanchang" in tools[0].function.arguments
+
+    # Case 2: 半角 DSML 格式且包含 CDATA
+    cdata_dsml_text = """<|DSML| calls>
+<|DSML| invoke name="edit">
+<|DSML| parameter name="file_path">/app/test.py</|DSML| parameter>
+<|DSML| parameter name="content"><![CDATA[print("hello\nworld")]]></|DSML| parameter>
+</|DSML| invoke>
+</|DSML| calls>"""
+
+    clean2, tools2 = extract_tool_calls(cdata_dsml_text)
+    assert clean2 == ""
+    assert len(tools2) == 1
+    assert tools2[0].function.name == "edit"
+    assert "/app/test.py" in tools2[0].function.arguments
+    assert "hello\\nworld" in tools2[0].function.arguments or "hello\nworld" in tools2[0].function.arguments
+
+    # Case 3: 并行多工具调用
+    multi_dsml_text = """<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="read_file">
+<｜｜DSML｜｜ parameter name="file_path">a.txt</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+<｜｜DSML｜｜ invoke name="read_file">
+<｜｜DSML｜｜ parameter name="file_path">b.txt</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+</｜｜DSML｜｜ calls>"""
+
+    clean3, tools3 = extract_tool_calls(multi_dsml_text)
+    assert clean3 == ""
+    assert len(tools3) == 2
+    assert tools3[0].function.name == "read_file"
+    assert tools3[1].function.name == "read_file"
+
+
+@pytest.mark.asyncio
+async def test_tool_type_coercion_and_error_recovery():
+    """测试基于 Schema 的参数强类型矫正、DSML 原生数字解析与报错自愈提示。"""
+    import json
+    from app.services.tool_parser import extract_tool_calls, format_messages_to_prompt
+    from app.schemas.openai import OpenAIChatMessage, OpenAITool, OpenAIToolFunction
+
+    bash_schema = {
+        "type": "object",
+        "properties": {
+            "command": {"type": "string"},
+            "timeout": {"type": "number"},
+            "background": {"type": "boolean"},
+        },
+        "required": ["command"],
+    }
+    tools_schemas = {"bash": bash_schema}
+
+    # 1. 真实故障场景测试：JSON 包含未转义双引号且 timeout 为数字
+    broken_json = """<tool_call>
+{"name": "bash", "arguments": {"command": "git -c user.name=\"Ethan0x0000\" commit -m \"chore: build\"", "timeout": 300000}}
+</tool_call>"""
+    _, tools = extract_tool_calls(broken_json, tools_schemas=tools_schemas)
+    assert len(tools) == 1
+    args = json.loads(tools[0].function.arguments)
+    assert args["timeout"] == 300000
+    assert isinstance(args["timeout"], int)
+
+    # 2. 真实故障场景测试：模型输出了字符串形式的数字，Schema 纠正自愈
+    string_timeout_json = """<tool_call>
+{"name": "bash", "arguments": {"command": "pnpm install", "timeout": "300000", "background": "true"}}
+</tool_call>"""
+    _, tools = extract_tool_calls(string_timeout_json, tools_schemas=tools_schemas)
+    assert len(tools) == 1
+    args = json.loads(tools[0].function.arguments)
+    assert args["timeout"] == 300000
+    assert isinstance(args["timeout"], int)
+    assert args["background"] is True
+
+    # 3. DSML 场景测试：DSML 中原生输出数字与布尔
+    dsml_numeric = """<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="bash">
+<｜｜DSML｜｜ parameter name="command">pnpm test</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="timeout">300000</｜｜DSML｜｜ parameter>
+<｜｜DSML｜｜ parameter name="background">false</｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+</｜｜DSML｜｜ calls>"""
+    _, tools = extract_tool_calls(dsml_numeric, tools_schemas=tools_schemas)
+    assert len(tools) == 1
+    args = json.loads(tools[0].function.arguments)
+    assert args["timeout"] == 300000
+    assert isinstance(args["timeout"], int)
+    assert args["background"] is False
+
+    # 4. 上条工具执行报错时的自愈引导提示
+    tools_def = [
+        OpenAITool(
+            type="function",
+            function=OpenAIToolFunction(
+                name="bash",
+                description="Run command",
+                parameters=bash_schema,
+            ),
+        )
+    ]
+    error_msgs = [
+        OpenAIChatMessage(role="user", content="run build"),
+        OpenAIChatMessage(
+            role="assistant",
+            content="",
+            tool_calls=tools,
+        ),
+        OpenAIChatMessage(
+            role="tool",
+            tool_call_id="call_12345",
+            content='The bash tool was called with invalid arguments: SchemaError(Expected number, got "300000" at ["timeout"])',
+        ),
+    ]
+    compiled = format_messages_to_prompt(error_msgs, tools_def)
+    assert "ATTENTION - The previous tool call returned an ERROR" in compiled
+    assert "SchemaError" in compiled
+    assert "correct your argument values and types" in compiled
+
+
+@pytest.mark.asyncio
 async def test_auth_token_set(monkeypatch, tmp_path):
     fake_proj = tmp_path / "credentials.json"
     fake_user = tmp_path / "user_credentials.json"

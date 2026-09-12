@@ -246,11 +246,25 @@ async def anthropic_messages(
                 # 工具调用解析
                 if has_tools:
                     allowed_tool_names = {t.name for t in (request.tools or []) if t.name} if request.tools else None
-                    clean_text, tool_calls = extract_tool_calls(full_text, allowed_tool_names=allowed_tool_names)
+                    tools_schemas = {
+                        t.name: (t.input_schema or {})
+                        for t in (request.tools or [])
+                        if t.name
+                    } if request.tools else None
+
+                    clean_text, tool_calls = extract_tool_calls(
+                        full_text,
+                        allowed_tool_names=allowed_tool_names,
+                        tools_schemas=tools_schemas,
+                    )
                     # 兜底：如果正文中没有工具调用，但 thinking 思考链中误输出了工具调用，智能拦截纠偏
                     if not tool_calls and accumulated_thinking:
                         th_full = "".join(accumulated_thinking)
-                        thinking_clean, thinking_tools = extract_tool_calls(th_full, allowed_tool_names=allowed_tool_names)
+                        thinking_clean, thinking_tools = extract_tool_calls(
+                            th_full,
+                            allowed_tool_names=allowed_tool_names,
+                            tools_schemas=tools_schemas,
+                        )
                         if thinking_tools:
                             logger.warning(f"Anthropic streaming: 成功从 thinking 中拯救 {len(thinking_tools)} 个工具调用！")
                             tool_calls = thinking_tools
@@ -402,12 +416,19 @@ async def anthropic_messages(
         try:
             resp = await provider.send_message(deepseek_req)
 
+            tools_schemas = {
+                t.name: (t.input_schema or {})
+                for t in (request.tools or [])
+                if t.name
+            } if request.tools else None
+
             result = convert_deepseek_response_to_anthropic(
                 resp,
                 model=request.model,
                 has_tools=has_tools,
                 input_tokens=prompt_tokens,
                 cached_tokens=cached_tokens,
+                tools_schemas=tools_schemas,
             )
             proxy_logger.log_request_end(log_id, status_code=200, tokens_out=resp.token_usage or 0)
 

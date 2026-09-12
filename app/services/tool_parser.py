@@ -116,17 +116,17 @@ Your primary objective is to ACCOMPLISH TASKS DIRECTLY using the provided tools,
    - Never guess file contents, environment states, or command outputs. Execute the tool and wait for real output from the environment.
 
 5. TOOL CALL FORMAT:
-   When requesting a tool, output valid JSON inside `<tool_call>...</tool_call>`:
+   When requesting a tool, you can emit DeepSeek standard DSML format (RECOMMENDED):
+<｜｜DSML｜｜ calls>
+<｜｜DSML｜｜ invoke name="<function_name>">
+<｜｜DSML｜｜ parameter name="<param_name>"><param_val></｜｜DSML｜｜ parameter>
+</｜｜DSML｜｜ invoke>
+</｜｜DSML｜｜ calls>
+
+   Alternatively, standard JSON format is also fully supported:
 <tool_call>
 {{"name": "<function_name>", "arguments": {{...}}}}
 </tool_call>
-
-Alternatively, standard DSML or JSON format is also accepted:
-<|DSML|tool_calls>
-<|DSML|invoke name="<function_name>">
-<|DSML|parameter name="<param_name>"><![CDATA[<param_val>]]></|DSML|parameter>
-</|DSML|invoke>
-</|DSML|tool_calls>
 
 6. EXAMPLES OF CORRECT BEHAVIOR:
 Example 1 (English):
@@ -238,13 +238,28 @@ def format_messages_to_prompt(
 
     # 3. 如果上一条是工具执行结果，指令模型立即分析并执行下一步工具调用，直到任务彻底完成
     if compressed_messages and compressed_messages[-1].role in ["tool", "function"]:
-        prompt_parts.append(
-            "\n[Autonomous Directive: The tool execution result is provided above. Proceed with the task immediately. "
-            "Analyze the output and invoke the next tool call in your final response if more investigation, code editing, or verification is needed: "
-            "<tool_call>{\"name\": \"...\", \"arguments\": {...}}</tool_call>. "
-            "Plan in thought, but emit <tool_call> ONLY in your final response, NEVER inside thinking. "
-            "DO NOT stop halfway with an intermediate conversational summary. Work relentlessly until the user's objective is 100% completed!]"
+        last_tool_content = str(compressed_messages[-1].content or "")
+        is_error = any(
+            kw in last_tool_content.lower()
+            for kw in ["error", "fail", "invalid", "not found", "exception", "exit status", "command not found"]
         )
+        if is_error:
+            prompt_parts.append(
+                "\n[Autonomous Directive: ATTENTION - The previous tool call returned an ERROR or failure indicated above. "
+                "Carefully inspect the error message. If it was a SchemaError, argument error, or type mismatch, you MUST correct your argument values and types (for example, pass numbers as raw unquoted numbers, booleans as true/false, or fix syntax). "
+                "Do NOT repeat the exact same failing tool call without fixing the issue! "
+                "Adjust your approach, fix the arguments, and invoke the corrected tool call or try an alternative solution: "
+                "<tool_call>{\"name\": \"...\", \"arguments\": {...}}</tool_call>. "
+                "Plan in thought, emit <tool_call> ONLY in your final response, and solve the problem!]"
+            )
+        else:
+            prompt_parts.append(
+                "\n[Autonomous Directive: The tool execution result is provided above. Proceed with the task immediately. "
+                "Analyze the output and invoke the next tool call in your final response if more investigation, code editing, or verification is needed: "
+                "<tool_call>{\"name\": \"...\", \"arguments\": {...}}</tool_call>. "
+                "Plan in thought, but emit <tool_call> ONLY in your final response, NEVER inside thinking. "
+                "DO NOT stop halfway with an intermediate conversational summary. Work relentlessly until the user's objective is 100% completed!]"
+            )
     # 4. 如果提供了 tools 且最后一条是用户指令，注入行动优先指令
     elif tools and compressed_messages and compressed_messages[-1].role == "user":
         prompt_parts.append(
@@ -271,11 +286,152 @@ def normalize_qwen_parameter_tags(text: str) -> str:
     return normalized
 
 
+def _parse_param_value(val_str: str, explicit_string: bool = False) -> Any:
+    """
+    智能解析参数值：
+    - 当 explicit_string=True 时直接作为字符串保留
+    - 否则自动恢复数字 (int/float)、布尔 (True/False)、null (None)、JSON 对象与数组等原生类型
+    - 避免将 DSML 中的原生数字或布尔字面量粗暴当作字符串处理
+    """
+    if explicit_string or not isinstance(val_str, str):
+        return val_str
+    val = val_str.strip()
+    if not val:
+        return val_str
+
+    # 尝试按 JSON 标准语法反序列化 (支持 int, float, bool, null, dict, list)
+    try:
+        return json.loads(val)
+    except Exception:
+        pass
+
+    # 针对不带标准引号但显然是布尔或空值的情况容错
+    low = val.lower()
+    if low == "true":
+        return True
+    if low == "false":
+        return False
+    if low in ("null", "none"):
+        return None
+
+    # 尝试解析带符号或纯数字
+    try:
+        if "." in val or "e" in low:
+            return float(val)
+        return int(val)
+    except ValueError:
+        pass
+
+    return val_str
+
+
+def get_expected_schema_types(prop_def: Any) -> Set[str]:
+    """从参数的 JSON Schema 属性定义中提取期望的数据类型集合。"""
+    types: Set[str] = set()
+    if not isinstance(prop_def, dict):
+        return types
+    t = prop_def.get("type")
+    if isinstance(t, str):
+        types.add(t.lower())
+    elif isinstance(t, list):
+        types.update(str(x).lower() for x in t)
+    for branch in prop_def.get("anyOf", []) + prop_def.get("oneOf", []):
+        if isinstance(branch, dict) and "type" in branch:
+            bt = branch["type"]
+            if isinstance(bt, str):
+                types.add(bt.lower())
+            elif isinstance(bt, list):
+                types.update(str(x).lower() for x in bt)
+    return types
+
+
+def coerce_args_to_schema(
+    args_dict: Dict[str, Any],
+    schema: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """
+    依据工具的 JSON Schema 参数定义，对传入的参数值进行自动类型校准与自愈转换：
+    - 将字符串数字 ("300000") 纠正为数值类型 (300000)
+    - 将字符串布尔 ("true"/"false") 纠正为布尔值 (True/False)
+    - 将嵌套 JSON 字符串纠正为字典或列表
+    - 彻底杜绝客户端 (如 OpenCode) 因 Schema 强类型校验抛出 SchemaError 导致的无限重试循环
+    """
+    if not schema or not isinstance(schema, dict) or not isinstance(args_dict, dict):
+        return args_dict
+    props = schema.get("properties", {})
+    if not isinstance(props, dict):
+        return args_dict
+
+    coerced = dict(args_dict)
+    for k, v in list(coerced.items()):
+        if k not in props:
+            continue
+        prop_def = props[k]
+        expected = get_expected_schema_types(prop_def)
+        if not expected:
+            continue
+
+        # 1. 期望 number / integer，而当前是字符串
+        if "number" in expected or "integer" in expected:
+            if isinstance(v, str):
+                s = v.strip()
+                try:
+                    if "." in s or "e" in s.lower():
+                        val = float(s)
+                        if "integer" in expected and "number" not in expected:
+                            val = int(val)
+                    else:
+                        val = int(s) if "integer" in expected or "." not in s else float(s)
+                    coerced[k] = val
+                except ValueError:
+                    pass
+
+        # 2. 期望 boolean，而当前是字符串或 0/1
+        elif "boolean" in expected:
+            if isinstance(v, str):
+                s = v.strip().lower()
+                if s in ("true", "1"):
+                    coerced[k] = True
+                elif s in ("false", "0"):
+                    coerced[k] = False
+            elif isinstance(v, (int, float)) and v in (0, 1):
+                coerced[k] = bool(v)
+
+        # 3. 期望 string，而当前是标量数字/布尔
+        elif "string" in expected:
+            if not isinstance(v, str) and v is not None:
+                if not isinstance(v, (dict, list)):
+                    coerced[k] = str(v)
+
+        # 4. 期望 array，而当前是 JSON 字符串
+        elif "array" in expected:
+            if isinstance(v, str):
+                s = v.strip()
+                if s.startswith("[") and s.endswith("]"):
+                    try:
+                        coerced[k] = json.loads(s)
+                    except Exception:
+                        pass
+
+        # 5. 期望 object，而当前是 JSON 字符串
+        elif "object" in expected:
+            if isinstance(v, str):
+                s = v.strip()
+                if s.startswith("{") and s.endswith("}"):
+                    try:
+                        coerced[k] = json.loads(s)
+                    except Exception:
+                        pass
+
+    return coerced
+
+
 def _parse_broken_arguments(args_str: str) -> Dict[str, Any]:
     """
     容错参数解析器：
     - 修复带有未转义内部引号的 JSON (如 shell 命令里的 echo "...", grep '...')
     - 支持通过键值对位置切分提取字段
+    - 自动保留裸露数字、布尔等字面量的原生数据类型
     """
     s = args_str.strip()
     if s.startswith("{") and s.endswith("}"):
@@ -302,20 +458,27 @@ def _parse_broken_arguments(args_str: str) -> Dict[str, Any]:
         raw_val = s[val_start:val_end].strip()
         if raw_val.endswith(","):
             raw_val = raw_val[:-1].strip()
+
+        has_quotes = False
         if raw_val.startswith('"') and raw_val.endswith('"') and len(raw_val) >= 2:
             raw_val = raw_val[1:-1]
+            has_quotes = True
         elif raw_val.startswith('"'):
             raw_val = raw_val[1:]
+            has_quotes = True
         elif raw_val.endswith('"'):
             raw_val = raw_val[:-1]
+            has_quotes = True
 
-        if (raw_val.startswith("{") and raw_val.endswith("}")) or (raw_val.startswith("[") and raw_val.endswith("]")):
-            try:
-                raw_val = json.loads(raw_val)
-            except Exception:
-                pass
-
-        result[key] = raw_val
+        if not has_quotes:
+            result[key] = _parse_param_value(raw_val)
+        else:
+            if (raw_val.startswith("{") and raw_val.endswith("}")) or (raw_val.startswith("[") and raw_val.endswith("]")):
+                try:
+                    raw_val = json.loads(raw_val)
+                except Exception:
+                    pass
+            result[key] = raw_val
 
     return result
 
@@ -425,6 +588,7 @@ def _parse_all_tool_json(raw_json: str, default_name: Optional[str] = None) -> L
 def extract_tool_calls(
     text: str,
     allowed_tool_names: Optional[Set[str]] = None,
+    tools_schemas: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> Tuple[str, List[OpenAIToolCall]]:
     """
     从模型输出内容中提取工具调用 (Tool Calls)：
@@ -433,6 +597,7 @@ def extract_tool_calls(
     - 支持 Anthropic/Claude 格式 (<invoke name="...">...</invoke>)
     - 支持 Qwen 原生标签格式 (<function=name>...</function>)
     - 支持 Markdown 代码块语法 (```tool_call...```)
+    - 支持基于 tools_schemas 的参数强类型自动矫正 (Coercion)，杜绝客户端 SchemaError
     - 可选通过 allowed_tool_names 过滤仅属于当前请求的合法工具，避免将文档说明或伪代码误识别为工具调用
     - 自动去重相同调用并返回 (清洗后的正文文本, 工具调用列表)
     """
@@ -440,103 +605,128 @@ def extract_tool_calls(
     seen_calls = set()
     clean_text = text
 
-    # 0. 检验 DeepSeek 原生 DSML 格式
-    dsml_invoke_pat = r"<[｜\|]*\s*DSML\s*[｜\|]*invoke\s+name=[\"']?([^\"'>]+)[\"']?[^>]*>\s*(.*?)\s*</[｜\|]*\s*DSML\s*[｜\|]*invoke>"
-    dsml_param_pat = r"<[｜\|]*\s*DSML\s*[｜\|]*parameter\s+name=[\"']?([^\"'>]+)[\"']?[^>]*>\s*(.*?)\s*</[｜\|]*\s*DSML\s*[｜\|]*parameter>"
-    hybrid_dsml_pat = r"<[｜\|]*\s*(?:DSML\s*[｜\|]*)?tool_calls?[^>]*>\s*<[｜\|]*\s*DSML\s*[｜\|]*parameter\s+name=[\"']?name[\"']?[^>]*>(.*?)</[｜\|]*\s*DSML\s*[｜\|]*parameter>\s*<[｜\|]*\s*DSML\s*[｜\|]*parameter\s+name=[\"']?(?:arguments|input|parameters)[\"']?[^>]*>(.*?)(?:</[｜\|]*\s*DSML\s*[｜\|]*parameter>|\s*</[｜\|]*\s*DSML\s*[｜\|]*invoke>|\s*</tool_calls?>|$)"
-
-    for match in re.finditer(hybrid_dsml_pat, text, re.DOTALL):
-        name = match.group(1).strip()
+    def add_tool_call(name: str, args_input: Any) -> bool:
+        name = str(name).strip()
         if allowed_tool_names is not None and name not in allowed_tool_names:
-            continue
+            return False
+
+        if isinstance(args_input, dict):
+            args_dict = dict(args_input)
+        elif isinstance(args_input, str):
+            try:
+                parsed = json.loads(args_input, strict=False)
+                args_dict = parsed if isinstance(parsed, dict) else _parse_broken_arguments(args_input)
+            except Exception:
+                args_dict = _parse_broken_arguments(args_input) if args_input else {}
+        else:
+            args_dict = {}
+
+        # 依据 Schema 进行类型自动矫正 (Coercion)，如将 "300000" 纠正为数值 300000
+        schema = tools_schemas.get(name) if tools_schemas else None
+        if schema:
+            args_dict = coerce_args_to_schema(args_dict, schema)
+
+        args_str = json.dumps(args_dict, ensure_ascii=False)
+        call_key = (name, args_str)
+        if call_key not in seen_calls:
+            seen_calls.add(call_key)
+            call_id = f"call_{uuid.uuid4().hex[:8]}"
+            tool_calls.append(
+                OpenAIToolCall(
+                    id=call_id,
+                    type="function",
+                    function=OpenAIToolCallFunction(name=name, arguments=args_str),
+                )
+            )
+            return True
+        return False
+
+    # 0. 检验 DeepSeek 原生 DSML 与 Claude/Anthropic 标签格式 (<｜｜DSML｜｜ invoke ...> / <invoke ...>)
+    dsml_invoke_pat = re.compile(
+        r"<[｜\|]*\s*(?:DSML\s*[｜\|]*\s*)?invoke\b([^>]*)>(.*?)</[｜\|]*\s*(?:DSML\s*[｜\|]*\s*)?invoke>",
+        re.DOTALL | re.IGNORECASE,
+    )
+    dsml_param_pat = re.compile(
+        r"<[｜\|]*\s*(?:DSML\s*[｜\|]*\s*)?parameter\b([^>]*)>(.*?)</[｜\|]*\s*(?:DSML\s*[｜\|]*\s*)?parameter>|<parameter\s*=\s*[\"']?([a-zA-Z0-9_\-]+)[\"']?[^>]*>(.*?)</parameter>",
+        re.DOTALL | re.IGNORECASE,
+    )
+    hybrid_dsml_pat = re.compile(
+        r"<[｜\|]*\s*(?:DSML\s*[｜\|]*\s*)?(?:tool_calls?|calls)[^>]*>\s*"
+        r"<[｜\|]*\s*DSML\s*[｜\|]*\s*parameter\s+[^>]*name=[\"']?name[\"']?[^>]*>(.*?)</[｜\|]*\s*DSML\s*[｜\|]*\s*parameter>\s*"
+        r"<[｜\|]*\s*DSML\s*[｜\|]*\s*parameter\s+[^>]*name=[\"']?(?:arguments|input|parameters)[\"']?[^>]*>(.*?)"
+        r"(?:</[｜\|]*\s*DSML\s*[｜\|]*\s*parameter>|\s*</[｜\|]*\s*DSML\s*[｜\|]*\s*invoke>|\s*</(?:tool_calls?|calls)>|$)",
+        re.DOTALL | re.IGNORECASE,
+    )
+
+    # 0.1 优先匹配 Hybrid DSML
+    for match in hybrid_dsml_pat.finditer(text):
+        name = match.group(1).strip()
         args_raw = match.group(2).strip()
-        try:
-            args_obj = json.loads(args_raw, strict=False)
-            args_str = json.dumps(args_obj, ensure_ascii=False) if isinstance(args_obj, dict) else str(args_raw)
-        except Exception:
-            args_str = args_raw
-        call_key = (name, args_str)
-        if call_key not in seen_calls:
-            seen_calls.add(call_key)
-            call_id = f"call_{uuid.uuid4().hex[:8]}"
-            tool_calls.append(
-                OpenAIToolCall(
-                    id=call_id,
-                    type="function",
-                    function=OpenAIToolCallFunction(name=name, arguments=args_str),
-                )
-            )
+        add_tool_call(name, args_raw)
 
-    for match in re.finditer(dsml_invoke_pat, text, re.DOTALL):
-        name = match.group(1).strip()
+    # 0.2 统一匹配 DSML 及 Anthropic invoke 块
+    for match in dsml_invoke_pat.finditer(text):
+        attrs = match.group(1) or ""
+        body = match.group(2).strip()
+        name_match = re.search(r'\bname=[\"\']?([^\"\'\s>]+)[\"\']?', attrs)
+        if not name_match:
+            continue
+        name = name_match.group(1).strip()
         if allowed_tool_names is not None and name not in allowed_tool_names:
             continue
-        body = match.group(2).strip()
+
         args_dict = {}
-        for pm in re.finditer(dsml_param_pat, body, re.DOTALL):
-            p_name = pm.group(1).strip()
-            p_val = pm.group(2).strip()
-            if (p_val.startswith("{") and p_val.endswith("}")) or (p_val.startswith("[") and p_val.endswith("]")):
-                try:
-                    p_val = json.loads(p_val)
-                except Exception:
-                    pass
-            args_dict[p_name] = p_val
+        found_params = False
+        for pm in dsml_param_pat.finditer(body):
+            found_params = True
+            if pm.group(3) is not None:
+                p_name = pm.group(3).strip()
+                p_val = pm.group(4).strip()
+                p_attrs = ""
+            else:
+                p_attrs = pm.group(1) or ""
+                p_val = pm.group(2).strip()
+                p_name_match = re.search(r'\bname=[\"\']?([^\"\'\s>]+)[\"\']?|=([a-zA-Z0-9_\-]+)', p_attrs)
+                p_name = (p_name_match.group(1) or p_name_match.group(2)).strip() if p_name_match else ""
 
-        args_str = json.dumps(args_dict, ensure_ascii=False)
-        call_key = (name, args_str)
-        if call_key not in seen_calls:
-            seen_calls.add(call_key)
-            call_id = f"call_{uuid.uuid4().hex[:8]}"
-            tool_calls.append(
-                OpenAIToolCall(
-                    id=call_id,
-                    type="function",
-                    function=OpenAIToolCallFunction(name=name, arguments=args_str),
-                )
-            )
+            if not p_name:
+                continue
 
-    clean_text = re.sub(r"<[｜\|]*\s*DSML\s*[｜\|]*tool_calls?>.*?</[｜\|]*\s*DSML\s*[｜\|]*tool_calls?>", "", clean_text, flags=re.DOTALL)
-    clean_text = re.sub(hybrid_dsml_pat, "", clean_text, flags=re.DOTALL)
-    clean_text = re.sub(dsml_invoke_pat, "", clean_text, flags=re.DOTALL)
-    clean_text = re.sub(r"</?[｜\|]*\s*DSML\s*[｜\|]*[^>]*>", "", clean_text)
+            # 解包 CDATA: <![CDATA[...]]>
+            cdata_match = re.search(r'<!\[CDATA\[([\s\S]*?)\]\]>', p_val)
+            if cdata_match:
+                p_val = cdata_match.group(1)
 
-    # 1. 检验 Claude / Anthropic 格式: <invoke name="...">...</invoke>
-    invoke_pat = r"<invoke\s+name=[\"']?([a-zA-Z0-9_\-\.]+)[\"']?[^>]*>\s*(.*?)\s*</invoke>"
-    param_pat = r"<parameter\s+(?:name=[\"']?([a-zA-Z0-9_\-]+)[\"']?|=([a-zA-Z0-9_\-]+)|([a-zA-Z0-9_\-]+))[^>]*>\s*(.*?)\s*</parameter>"
+            is_explicit_str = bool(re.search(r'\bstring=[\"\']?true[\"\']?', p_attrs, re.IGNORECASE))
+            args_dict[p_name] = _parse_param_value(p_val, explicit_string=is_explicit_str)
 
-    for match in re.finditer(invoke_pat, text, re.DOTALL):
-        name = match.group(1).strip()
-        if allowed_tool_names is not None and name not in allowed_tool_names:
-            continue
-        body = match.group(2).strip()
-        args_dict = {}
-        for pm in re.finditer(param_pat, body, re.DOTALL):
-            p_name = pm.group(1) or pm.group(2) or pm.group(3)
-            p_val = pm.group(4).strip()
-            if (p_val.startswith("{") and p_val.endswith("}")) or (p_val.startswith("[") and p_val.endswith("]")):
-                try:
-                    p_val = json.loads(p_val)
-                except Exception:
-                    pass
-            args_dict[p_name] = p_val
+        # 容错：如果 body 内部没有 parameter 标签，但有 JSON 对象
+        if not found_params and body:
+            parsed_args = _parse_broken_arguments(body)
+            if parsed_args:
+                args_dict = parsed_args
 
-        args_str = json.dumps(args_dict, ensure_ascii=False)
-        call_key = (name, args_str)
-        if call_key not in seen_calls:
-            seen_calls.add(call_key)
-            call_id = f"call_{uuid.uuid4().hex[:8]}"
-            tool_calls.append(
-                OpenAIToolCall(
-                    id=call_id,
-                    type="function",
-                    function=OpenAIToolCallFunction(name=name, arguments=args_str),
-                )
-            )
+        # 如果只有一个 arguments/parameters/input 字典，自动解包展开
+        if len(args_dict) == 1 and any(k in args_dict for k in ["arguments", "parameters", "input"]) and isinstance(list(args_dict.values())[0], dict):
+            args_dict = list(args_dict.values())[0]
 
-    if any(tc.type == "function" for tc in tool_calls):
-        clean_text = re.sub(r"<[｜\|]*\s*(?:DSML\s*[｜\|]*)?tool_calls?[^>]*>\s*(?:<invoke\b.*?</invoke>\s*)+</[｜\|]*\s*(?:DSML\s*[｜\|]*)?tool_calls?>", "", clean_text, flags=re.DOTALL)
-        clean_text = re.sub(invoke_pat, "", clean_text, flags=re.DOTALL)
+        add_tool_call(name, args_dict)
+
+    clean_text = re.sub(
+        r"<[｜\|]*\s*(?:DSML\s*[｜\|]*\s*)?(?:calls|tool_calls?|function_calls?)[^>]*>.*?</[｜\|]*\s*(?:DSML\s*[｜\|]*\s*)?(?:calls|tool_calls?|function_calls?)[^>]*>",
+        "",
+        clean_text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    clean_text = re.sub(
+        r"<[｜\|]*\s*(?:DSML\s*[｜\|]*\s*)?invoke\b[^>]*>.*?</[｜\|]*\s*(?:DSML\s*[｜\|]*\s*)?invoke>",
+        "",
+        clean_text,
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    clean_text = re.sub(hybrid_dsml_pat, "", clean_text)
+    clean_text = re.sub(r"</?[｜\|]*\s*DSML\s*[｜\|]*[^>]*>", "", clean_text, flags=re.IGNORECASE)
+    clean_text = re.sub(r"</?[｜\|]*\s*(?:calls|tool_calls?|function_calls?|invoke)\b[^>]*>", "", clean_text, flags=re.IGNORECASE)
 
     # 2. 匹配标准 JSON tool_call / function_call 块 (支持在标签属性或后缀中指定 name="..." 或 :name)
     tag_pat = r"<[｜\|]*\s*(?:DSML\s*[｜\|]*)?(?:tool_calls?|function_calls?|tool)(?:\s+[^>]*?name=[\"']?([^\"'>\s]+)[\"']?|:([a-zA-Z0-9_\-\.]+))?[^>]*>\s*(.*?)\s*</[｜\|]*\s*(?:DSML\s*[｜\|]*)?(?:tool_calls?|function_calls?|tool)[^>]*>"
@@ -548,19 +738,7 @@ def extract_tool_calls(
         parsed_list = _parse_all_tool_json(raw_content, default_name=def_name)
         found_valid = False
         for name, args_str in parsed_list:
-            if allowed_tool_names is not None and name not in allowed_tool_names:
-                continue
-            call_key = (name, args_str)
-            if call_key not in seen_calls:
-                seen_calls.add(call_key)
-                call_id = f"call_{uuid.uuid4().hex[:8]}"
-                tool_calls.append(
-                    OpenAIToolCall(
-                        id=call_id,
-                        type="function",
-                        function=OpenAIToolCallFunction(name=name, arguments=args_str),
-                    )
-                )
+            if add_tool_call(name, args_str):
                 found_valid = True
         if found_valid:
             clean_text = clean_text.replace(match.group(0), "")
@@ -571,19 +749,7 @@ def extract_tool_calls(
         parsed_list = _parse_all_tool_json(raw_content, default_name=def_name)
         found_valid = False
         for name, args_str in parsed_list:
-            if allowed_tool_names is not None and name not in allowed_tool_names:
-                continue
-            call_key = (name, args_str)
-            if call_key not in seen_calls:
-                seen_calls.add(call_key)
-                call_id = f"call_{uuid.uuid4().hex[:8]}"
-                tool_calls.append(
-                    OpenAIToolCall(
-                        id=call_id,
-                        type="function",
-                        function=OpenAIToolCallFunction(name=name, arguments=args_str),
-                    )
-                )
+            if add_tool_call(name, args_str):
                 found_valid = True
         if found_valid:
             clean_text = clean_text.replace(match.group(0), "")
@@ -592,35 +758,16 @@ def extract_tool_calls(
     func_pat = r"<function=([a-zA-Z0-9_\-\.]+)[^>]*>\s*(.*?)\s*</function>"
     for match in re.finditer(func_pat, text, re.DOTALL):
         name = match.group(1).strip()
-        if allowed_tool_names is not None and name not in allowed_tool_names:
-            continue
         raw_args = match.group(2).strip()
         args_str = raw_args
         if "<parameter" in raw_args:
             param_dict = {}
             for p in re.finditer(r'<parameter=([a-zA-Z0-9_\-]+)>\s*(.*?)\s*(?:</parameter>|$)', raw_args, re.DOTALL):
-                param_dict[p.group(1)] = p.group(2).strip().strip("\"'")
-            if param_dict:
-                args_str = json.dumps(param_dict, ensure_ascii=False)
+                param_dict[p.group(1)] = _parse_param_value(p.group(2).strip().strip("\"'"))
+            add_tool_call(name, param_dict)
         else:
-            try:
-                args_obj = json.loads(raw_args, strict=False)
-                args_str = json.dumps(args_obj, ensure_ascii=False) if isinstance(args_obj, dict) else str(args_obj)
-            except Exception:
-                args_str = raw_args
-
-        call_key = (name, args_str)
-        if call_key not in seen_calls:
-            seen_calls.add(call_key)
-            call_id = f"call_{uuid.uuid4().hex[:8]}"
-            tool_calls.append(
-                OpenAIToolCall(
-                    id=call_id,
-                    type="function",
-                    function=OpenAIToolCallFunction(name=name, arguments=args_str),
-                )
-            )
-            clean_text = clean_text.replace(match.group(0), "")
+            add_tool_call(name, raw_args)
+        clean_text = clean_text.replace(match.group(0), "")
 
     # 4. 匹配无标签裸露的 JSON 工具调用 (Naked JSON tool call)
     naked_pat = re.compile(
@@ -629,8 +776,6 @@ def extract_tool_calls(
     )
     for match in naked_pat.finditer(clean_text):
         name = match.group(1).strip()
-        if allowed_tool_names is not None and name not in allowed_tool_names:
-            continue
         start_idx = match.start()
         args_brace_start = match.start(2)
 
@@ -657,19 +802,7 @@ def extract_tool_calls(
 
         block = clean_text[start_idx:outer_end_idx]
         args_dict = _parse_broken_arguments(args_raw)
-        args_str = json.dumps(args_dict, ensure_ascii=False) if args_dict else "{}"
-
-        call_key = (name, args_str)
-        if call_key not in seen_calls:
-            seen_calls.add(call_key)
-            call_id = f"call_{uuid.uuid4().hex[:8]}"
-            tool_calls.append(
-                OpenAIToolCall(
-                    id=call_id,
-                    type="function",
-                    function=OpenAIToolCallFunction(name=name, arguments=args_str),
-                )
-            )
+        if add_tool_call(name, args_dict):
             clean_text = clean_text.replace(block, "")
 
     # 反序结构兼容: {"arguments": ..., "name": "..."}
@@ -679,25 +812,11 @@ def extract_tool_calls(
     )
     for match in naked_rev_pat.finditer(clean_text):
         name = match.group(2).strip()
-        if allowed_tool_names is not None and name not in allowed_tool_names:
-            continue
         args_raw = match.group(1).strip()
         block = match.group(0)
 
         args_dict = _parse_broken_arguments(args_raw)
-        args_str = json.dumps(args_dict, ensure_ascii=False) if args_dict else "{}"
-
-        call_key = (name, args_str)
-        if call_key not in seen_calls:
-            seen_calls.add(call_key)
-            call_id = f"call_{uuid.uuid4().hex[:8]}"
-            tool_calls.append(
-                OpenAIToolCall(
-                    id=call_id,
-                    type="function",
-                    function=OpenAIToolCallFunction(name=name, arguments=args_str),
-                )
-            )
+        if add_tool_call(name, args_dict):
             clean_text = clean_text.replace(block, "")
 
     # 5. 容错提取非标准裸文件编辑指令
@@ -726,22 +845,8 @@ def extract_tool_calls(
                 break
 
         tool_name = "Edit" if is_edit else "Write"
-        if allowed_tool_names is not None and tool_name not in allowed_tool_names:
-            continue
-
         args_obj = {"file_path": fpath, "old_string": old_str, "new_string": new_str} if is_edit else {"file_path": fpath, "content": code_body}
-        args_str = json.dumps(args_obj, ensure_ascii=False)
-        call_key = (tool_name, args_str)
-        if call_key not in seen_calls:
-            seen_calls.add(call_key)
-            call_id = f"call_{uuid.uuid4().hex[:8]}"
-            tool_calls.append(
-                OpenAIToolCall(
-                    id=call_id,
-                    type="function",
-                    function=OpenAIToolCallFunction(name=tool_name, arguments=args_str),
-                )
-            )
+        if add_tool_call(tool_name, args_obj):
             clean_text = clean_text.replace(match.group(0), "")
 
     # 仅当实际提取出工具调用时清理外围空标签

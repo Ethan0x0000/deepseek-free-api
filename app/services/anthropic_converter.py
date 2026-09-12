@@ -223,6 +223,7 @@ def convert_deepseek_response_to_anthropic(
     has_tools: bool = False,
     input_tokens: int = 0,
     cached_tokens: int = 0,
+    tools_schemas: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> AnthropicMessagesResponse:
     """将 DeepSeek 同步响应转换为 AnthropicMessagesResponse。"""
     content_blocks: List[AnthropicContentBlock] = []
@@ -233,10 +234,10 @@ def convert_deepseek_response_to_anthropic(
     found_tool_calls = None
 
     if has_tools:
-        clean_text, found_tool_calls = extract_tool_calls(resp.content)
+        clean_text, found_tool_calls = extract_tool_calls(resp.content, tools_schemas=tools_schemas)
         # 兜底：如果正文中没有工具调用，但 thinking 思考链中误输出了工具调用，智能拦截纠偏
         if not found_tool_calls and resp.thinking:
-            thinking_clean, thinking_tools = extract_tool_calls(resp.thinking)
+            thinking_clean, thinking_tools = extract_tool_calls(resp.thinking, tools_schemas=tools_schemas)
             if thinking_tools:
                 logger.warning(f"Anthropic converter: 成功从 thinking 中拯救 {len(thinking_tools)} 个工具调用！")
                 found_tool_calls = thinking_tools
